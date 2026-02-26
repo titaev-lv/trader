@@ -30,12 +30,15 @@ func init() {
 	logFiles = make(map[string]io.WriteCloser)
 }
 
-func Init(levelStr, dir string, maxFileSizeMB int, maxBackups int, maxAgeDays int, compress bool) error {
-	if err := validateLogDir(dir); err != nil {
+func Init(levelStr, format string, maxFileSizeMB int, maxBackups int, maxAgeDays int, compress bool, errorLogPath, outRequestLogPath, wsInLogPath, wsOutLogPath, auditLogPath string, outRequestToStdout, wsInToStdout, wsOutToStdout, auditToStdout bool) error {
+	if err := validateLogPaths(errorLogPath, outRequestLogPath, wsInLogPath, wsOutLogPath, auditLogPath); err != nil {
 		return err
 	}
+	if format == "" {
+		format = "json"
+	}
 
-	logDir = dir
+	logDir = filepath.Dir(errorLogPath)
 	if maxFileSizeMB <= 0 {
 		maxFileSizeMB = 100
 	}
@@ -59,7 +62,6 @@ func Init(levelStr, dir string, maxFileSizeMB int, maxBackups int, maxAgeDays in
 		logLevel = slog.LevelInfo
 	}
 
-	errorLogPath := filepath.Join(filepath.Clean(dir), "error.log")
 	if err := ensureLogFileExists(errorLogPath); err != nil {
 		return err
 	}
@@ -72,7 +74,6 @@ func Init(levelStr, dir string, maxFileSizeMB int, maxBackups int, maxAgeDays in
 	}
 	logFiles["error"] = errorLogFile
 
-	outRequestLogPath := filepath.Join(filepath.Clean(dir), "out_request.log")
 	if err := ensureLogFileExists(outRequestLogPath); err != nil {
 		return err
 	}
@@ -85,7 +86,6 @@ func Init(levelStr, dir string, maxFileSizeMB int, maxBackups int, maxAgeDays in
 	}
 	logFiles["out_request"] = outRequestLogFile
 
-	wsInLogPath := filepath.Join(filepath.Clean(dir), "ws_in.log")
 	if err := ensureLogFileExists(wsInLogPath); err != nil {
 		return err
 	}
@@ -98,7 +98,6 @@ func Init(levelStr, dir string, maxFileSizeMB int, maxBackups int, maxAgeDays in
 	}
 	logFiles["ws_in"] = wsInLogFile
 
-	wsOutLogPath := filepath.Join(filepath.Clean(dir), "ws_out.log")
 	if err := ensureLogFileExists(wsOutLogPath); err != nil {
 		return err
 	}
@@ -111,7 +110,6 @@ func Init(levelStr, dir string, maxFileSizeMB int, maxBackups int, maxAgeDays in
 	}
 	logFiles["ws_out"] = wsOutLogFile
 
-	auditLogPath := filepath.Join(filepath.Clean(dir), "audit.log")
 	if err := ensureLogFileExists(auditLogPath); err != nil {
 		return err
 	}
@@ -128,22 +126,45 @@ func Init(levelStr, dir string, maxFileSizeMB int, maxBackups int, maxAgeDays in
 		Level:       logLevel,
 		ReplaceAttr: replaceTimeAttr,
 	}
+	auditOpts := &slog.HandlerOptions{
+		Level:       logLevel,
+		ReplaceAttr: replaceAuditAttr,
+	}
 
 	errorWriter := io.MultiWriter(os.Stdout, errorLogFile)
-	outRequestWriter := io.MultiWriter(os.Stdout, outRequestLogFile)
-	wsInWriter := io.MultiWriter(os.Stdout, wsInLogFile)
-	wsOutWriter := io.MultiWriter(os.Stdout, wsOutLogFile)
-	auditWriter := io.MultiWriter(os.Stdout, auditLogFile)
+	outRequestWriter := io.Writer(outRequestLogFile)
+	if outRequestToStdout {
+		outRequestWriter = io.MultiWriter(os.Stdout, outRequestLogFile)
+	}
+	wsInWriter := io.Writer(wsInLogFile)
+	if wsInToStdout {
+		wsInWriter = io.MultiWriter(os.Stdout, wsInLogFile)
+	}
+	wsOutWriter := io.Writer(wsOutLogFile)
+	if wsOutToStdout {
+		wsOutWriter = io.MultiWriter(os.Stdout, wsOutLogFile)
+	}
+	auditWriter := io.Writer(auditLogFile)
+	if auditToStdout {
+		auditWriter = io.MultiWriter(os.Stdout, auditLogFile)
+	}
 
-	Log = slog.New(slog.NewJSONHandler(errorWriter, opts))
-	OutRequestLog = slog.New(slog.NewJSONHandler(outRequestWriter, opts))
-	WSInLog = slog.New(slog.NewJSONHandler(wsInWriter, opts))
-	WSOutLog = slog.New(slog.NewJSONHandler(wsOutWriter, opts))
-	AuditLog = slog.New(slog.NewJSONHandler(auditWriter, opts))
+	Log = slog.New(newHandler(format, errorWriter, opts))
+	OutRequestLog = slog.New(newHandler(format, outRequestWriter, opts))
+	WSInLog = slog.New(newHandler(format, wsInWriter, opts))
+	WSOutLog = slog.New(newHandler(format, wsOutWriter, opts))
+	AuditLog = slog.New(newHandler(format, auditWriter, auditOpts))
 	Trade = Log
 	slog.SetDefault(Log)
 
 	return nil
+}
+
+func newHandler(format string, writer io.Writer, opts *slog.HandlerOptions) slog.Handler {
+	if strings.EqualFold(format, "text") {
+		return slog.NewTextHandler(writer, opts)
+	}
+	return slog.NewJSONHandler(writer, opts)
 }
 
 // Get - возвращает логгер для конкретного модуля
@@ -294,36 +315,55 @@ func replaceTimeAttr(_ []string, attr slog.Attr) slog.Attr {
 	return attr
 }
 
-func validateLogDir(dir string) error {
-	if dir == "" {
-		return fmt.Errorf("log directory is empty")
+func replaceAuditAttr(groups []string, attr slog.Attr) slog.Attr {
+	attr = replaceTimeAttr(groups, attr)
+	if attr.Key == slog.LevelKey {
+		return slog.Attr{}
 	}
-	if err := os.MkdirAll(dir, 0750); err != nil {
-		return fmt.Errorf("create log dir %s: %w", dir, err)
-	}
+	return attr
+}
 
-	file, err := os.CreateTemp(dir, ".write-test-*")
-	if err != nil {
-		return fmt.Errorf("create write test in %s: %w", dir, err)
-	}
-	name := file.Name()
-	if _, err := file.WriteString("test"); err != nil {
-		_ = file.Close()
-		_ = os.Remove(name)
-		return fmt.Errorf("write test in %s: %w", dir, err)
-	}
-	if err := file.Close(); err != nil {
-		_ = os.Remove(name)
-		return fmt.Errorf("close write test in %s: %w", dir, err)
-	}
+func validateLogPaths(paths ...string) error {
+	checked := make(map[string]struct{})
+	for _, path := range paths {
+		if path == "" {
+			return fmt.Errorf("log file path is empty")
+		}
+		dir := filepath.Dir(path)
+		if dir == "" || dir == "." {
+			return fmt.Errorf("invalid log file path %s", path)
+		}
+		if _, exists := checked[dir]; exists {
+			continue
+		}
+		checked[dir] = struct{}{}
+		if err := os.MkdirAll(dir, 0750); err != nil {
+			return fmt.Errorf("create log dir %s: %w", dir, err)
+		}
 
-	rotated := name + ".rotate"
-	if err := os.Rename(name, rotated); err != nil {
-		_ = os.Remove(name)
-		return fmt.Errorf("rename write test in %s: %w", dir, err)
-	}
-	if err := os.Remove(rotated); err != nil {
-		return fmt.Errorf("cleanup write test in %s: %w", dir, err)
+		file, err := os.CreateTemp(dir, ".write-test-*")
+		if err != nil {
+			return fmt.Errorf("create write test in %s: %w", dir, err)
+		}
+		name := file.Name()
+		if _, err := file.WriteString("test"); err != nil {
+			_ = file.Close()
+			_ = os.Remove(name)
+			return fmt.Errorf("write test in %s: %w", dir, err)
+		}
+		if err := file.Close(); err != nil {
+			_ = os.Remove(name)
+			return fmt.Errorf("close write test in %s: %w", dir, err)
+		}
+
+		rotated := name + ".rotate"
+		if err := os.Rename(name, rotated); err != nil {
+			_ = os.Remove(name)
+			return fmt.Errorf("rename write test in %s: %w", dir, err)
+		}
+		if err := os.Remove(rotated); err != nil {
+			return fmt.Errorf("cleanup write test in %s: %w", dir, err)
+		}
 	}
 
 	return nil

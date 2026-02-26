@@ -48,7 +48,7 @@ Trader теперь может работать в одной из трех ро
 
 ```go
 type Config struct {
-    Database   DatabaseConfig      // Было раньше
+    Databases  DatabasesConfig     // Подключения к БД/хранилищам
     Server     ServerConfig        // Было раньше
     Log        LogConfig           // Было раньше
     Trade      TradeConfig         // Было раньше
@@ -58,7 +58,7 @@ type Config struct {
     Role       string              // "monitor", "trader" или "both"
     Monitor    MonitorConfig       // Конфиг мониторинга
     Trader     TraderConfig        // Конфиг торговли
-    ClickHouse ClickHouseConfig    // Подключение к ClickHouse
+    // ClickHouse теперь в Databases.Quotes.ClickHouse
 }
 ```
 
@@ -66,7 +66,7 @@ type Config struct {
 - `Role` - определяет что делать сервису (мониторить, торговать или оба)
 - `Monitor` - параметры сбора данных (глубина OB, batch size и т.д.)
 - `Trader` - параметры торговли (max orders, стратегия, риск)
-- `ClickHouse` - где хранить исторические данные
+- `Databases.Quotes.ClickHouse` - где хранить исторические данные
 
 ### 2. MonitorConfig - Конфигурация мониторинга
 
@@ -221,25 +221,41 @@ type ClickHouseConfig struct {
 
 ```yaml
 # Для разработки (локальный ClickHouse)
-clickhouse:
-    host: localhost
-    port: 8123
-    username: default
-    password: ""
-    compression: false
-    replication_factor: 1
+databases:
+    quotes:
+        engine: clickhouse
+        clickhouse:
+            host: localhost
+            port: 8123
+            username: default
+            password: ""
+            compression: false
+            pool:
+                connect_timeout: 10
+                max_batch_size: 10000
+                replication_factor: 1
+            retry:
+                max_attempts: 3
 
 # Для production (облачный ClickHouse)
-clickhouse:
-    host: clickhouse-prod.company.com
-    port: 8123
-    username: crypto_service
-    password: very_secure_password
-    use_tls: true
-    tls_skip_verify: false
-    compression: true           # Сжимаем трафик
-    max_batch_size: 50000       # Большие batches
-    replication_factor: 2       # Дублируем данные
+databases:
+    quotes:
+        engine: clickhouse
+        clickhouse:
+            host: clickhouse-prod.company.com
+            port: 8123
+            username: crypto_service
+            password: very_secure_password
+            tls:
+                enabled: true
+                skip_verify: false
+            compression: true           # Сжимаем трафик
+            pool:
+                connect_timeout: 10
+                max_batch_size: 50000     # Большие batches
+                replication_factor: 2     # Дублируем данные
+            retry:
+                max_attempts: 5
 ```
 
 ---
@@ -258,12 +274,24 @@ monitor:
     ring_buffer_size: 30000
     save_interval: 5
 
-clickhouse:
-    host: clickhouse-prod.company.com
-    port: 8123
-    username: monitor_user
-    password: pass
-    compression: true
+databases:
+    quotes:
+        engine: clickhouse
+        clickhouse:
+            host: clickhouse-prod.company.com
+            port: 8123
+            username: monitor_user
+            password: pass
+            compression: true
+            tls:
+                enabled: true
+                skip_verify: false
+            pool:
+                connect_timeout: 10
+                max_batch_size: 10000
+                replication_factor: 1
+            retry:
+                max_attempts: 3
 ```
 
 **Что происходит**:

@@ -42,10 +42,10 @@ logger.Close() - закрывает логи (через defer)
 
 **Структуры**:
 ```go
-    Database  DatabaseConfig  // Параметры БД
-    Log       LogConfig       // Параметры логирования
-    Trade     TradeConfig     // Параметры торговли
-    OrderBook OrderBookConfig // Параметры книги ордеров
+  Databases DatabasesConfig // Параметры хранилищ (system/audit/quotes)
+  Logging   LogConfig       // Параметры логирования
+  Trade     TradeConfig     // Параметры торговли
+  OrderBook OrderBookConfig // Параметры книги ордеров
 }
   - Рекомендуется ≥ 5
 
@@ -91,7 +91,9 @@ ERROR   - критичные ошибки (crash, некорректные да�
 
 **Инициализация**:
 ```go
-logger.Init("info", "./logs", 10)  // level, dir, maxFileSizeMB
+// Инициализация выполняется из cmd/trader/main.go на основе conf/config.yaml
+// stdout дублирование потоков управляется флагами:
+// out_request_to_stdout, ws_in_to_stdout, ws_out_to_stdout, audit_to_stdout
 
 log := logger.Get("main")
 log.Info("Starting", "version", "2.0.1")
@@ -328,17 +330,17 @@ logger.Close() - закрывает логи
 
 ```bash
 # Просмотр основных логов
-tail -f logs/error.log
+tail -f /var/log/trader/error.log
 
 # Просмотр торговых логов
-tail -f logs/trade.log
+tail -f /var/log/trader/out_request.log
 
 # Последних 100 строк
-tail -100 logs/error.log
+tail -100 /var/log/trader/error.log
 
 # С фильтром
-grep "ERROR" logs/error.log
-grep "Connection" logs/error.log
+grep "ERROR" /var/log/trader/error.log
+grep "Connection" /var/log/trader/error.log
 ```
 
 ---
@@ -347,15 +349,29 @@ grep "Connection" logs/error.log
 
 **TLS/SSL поддержка**:
 ```yaml
-database:
-  use_tls: true
-  ca_cert: /path/to/ca.pem
-  client_cert: /path/to/client.pem
-  client_key: /path/to/client.key
+databases:
+  quotes:
+    engine: clickhouse
+    clickhouse:
+      tls:
+        enabled: true
+        skip_verify: false
+      pool:
+        connect_timeout: 10
+      retry:
+        max_attempts: 3
 ```
 
 **Таймауты**:
-- Подключение БД: настраивается в конфиге (по умолчанию 10s)
+- Подключение БД: `clickhouse.pool.connect_timeout` (по умолчанию 10s)
 - Graceful shutdown: 30 секунд (GracefulShutdownTimeout)
-- Retry logic: количество попыток = MaxRetries в конфиге
+- Retry logic: количество попыток = `clickhouse.retry.max_attempts`
+
+**ENV overrides (quotes.clickhouse)**:
+- `TRADER_DATABASES_QUOTES_CLICKHOUSE_TLS_ENABLED`
+- `TRADER_DATABASES_QUOTES_CLICKHOUSE_TLS_SKIP_VERIFY`
+- `TRADER_DATABASES_QUOTES_CLICKHOUSE_POOL_CONNECT_TIMEOUT`
+- `TRADER_DATABASES_QUOTES_CLICKHOUSE_POOL_MAX_BATCH_SIZE`
+- `TRADER_DATABASES_QUOTES_CLICKHOUSE_POOL_REPLICATION_FACTOR`
+- `TRADER_DATABASES_QUOTES_CLICKHOUSE_RETRY_MAX_ATTEMPTS`
 

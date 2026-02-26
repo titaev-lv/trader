@@ -5,8 +5,10 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -26,8 +28,37 @@ type Config struct {
 	Monitor MonitorConfig `yaml:"monitor"`
 	// Trader - конфигурация для торговли (используется если Role = "trader" или "both")
 	Trader TraderConfig `yaml:"trader"`
-	// ClickHouse - параметры подключения к ClickHouse для исторических данных
+	// Databases - унифицированные подключения к хранилищам
+	Databases DatabasesConfig `yaml:"databases"`
+}
+
+type DatabasesConfig struct {
+	System DatabaseTargetConfig `yaml:"system"`
+	Audit  DatabaseTargetConfig `yaml:"audit"`
+	Quotes DatabaseTargetConfig `yaml:"quotes"`
+}
+
+type DatabaseTargetConfig struct {
+	Engine     string           `yaml:"engine"`
 	ClickHouse ClickHouseConfig `yaml:"clickhouse"`
+	MySQL      MySQLConfig      `yaml:"mysql"`
+	PostgreSQL PostgreSQLConfig `yaml:"postgresql"`
+}
+
+type MySQLConfig struct {
+	Host     string `yaml:"host"`
+	Port     int    `yaml:"port"`
+	User     string `yaml:"user"`
+	Password string `yaml:"password"`
+	Database string `yaml:"database"`
+}
+
+type PostgreSQLConfig struct {
+	Host     string `yaml:"host"`
+	Port     int    `yaml:"port"`
+	User     string `yaml:"user"`
+	Password string `yaml:"password"`
+	Database string `yaml:"database"`
 }
 
 // OrderBookConfig - настройки для управления книгой ордеров
@@ -42,8 +73,20 @@ type OrderBookConfig struct {
 type LogConfig struct {
 	// Level - уровень логирования (debug, info, warn, error)
 	Level string `yaml:"level"`
-	// Dir - папка куда писать логи
+	// Format - формат логов (json или text)
+	Format string `yaml:"format"`
+	// Dir - папка куда писать логи (устарело; используйте *_path)
 	Dir string `yaml:"dir"`
+	// ErrorPath - путь к error.log
+	ErrorPath string `yaml:"error_path"`
+	// OutRequestPath - путь к out_request.log
+	OutRequestPath string `yaml:"out_request_path"`
+	// WSInPath - путь к ws_in.log
+	WSInPath string `yaml:"ws_in_path"`
+	// WSOutPath - путь к ws_out.log
+	WSOutPath string `yaml:"ws_out_path"`
+	// AuditPath - путь к audit.log
+	AuditPath string `yaml:"audit_path"`
 	// MaxFileSizeMB - максимальный размер одного лог файла в мегабайтах
 	// При достижении размера файл ротируется с добавлением timestamp
 	MaxFileSizeMB int `yaml:"max_size_mb"`
@@ -53,6 +96,14 @@ type LogConfig struct {
 	MaxAgeDays int `yaml:"max_age_days"`
 	// Compress - сжимать rotated логи
 	Compress bool `yaml:"compress"`
+	// OutRequestToStdout - дублировать out_request.log в stdout
+	OutRequestToStdout bool `yaml:"out_request_to_stdout"`
+	// WSInToStdout - дублировать ws_in.log в stdout
+	WSInToStdout bool `yaml:"ws_in_to_stdout"`
+	// WSOutToStdout - дублировать ws_out.log в stdout
+	WSOutToStdout bool `yaml:"ws_out_to_stdout"`
+	// AuditToStdout - дублировать audit.log в stdout
+	AuditToStdout bool `yaml:"audit_to_stdout"`
 }
 
 // TradeConfig - конфигурация торговых операций
@@ -137,30 +188,39 @@ type ClickHouseConfig struct {
 	// Password - пароль для подключения
 	Password string `yaml:"password"`
 
-	// UseTLS - использовать ли HTTPS для подключения
-	UseTLS bool `yaml:"use_tls"`
+	// TLS - настройки TLS для подключения
+	TLS TLSConfig `yaml:"tls"`
 
-	// TLSSkipVerify - пропустить проверку сертификата (небезопасно)
-	TLSSkipVerify bool `yaml:"tls_skip_verify"`
+	// Pool - настройки пула/батчинга
+	Pool ClickHousePoolConfig `yaml:"pool"`
 
-	// ConnectTimeout - таймаут подключения в секундах
-	ConnectTimeout int `yaml:"connect_timeout"`
-
-	// MaxRetries - максимальное количество попыток подключения
-	MaxRetries int `yaml:"max_retries"`
+	// Retry - настройки повторных попыток
+	Retry RetryConfig `yaml:"retry"`
 
 	// Compression - включить ли сжатие данных при отправке
 	// Значительно снижает трафик для больших объемов данных
 	Compression bool `yaml:"compression"`
+}
 
-	// MaxBatchSize - максимальный размер batch для отправки данных
-	// ClickHouse эффективнее работает с большими batch, но нужна память
-	MaxBatchSize int `yaml:"max_batch_size"`
+type TLSConfig struct {
+	Enabled    bool   `yaml:"enabled"`
+	SkipVerify bool   `yaml:"skip_verify"`
+	CertPath   string `yaml:"cert_path"`
+	KeyPath    string `yaml:"key_path"`
+	CAPath     string `yaml:"ca_path"`
+}
 
-	// ReplicationFactor - фактор репликации данных в ClickHouse
-	// 1 = без репликации (быстро но рискованно)
-	// 2+ = с репликацией (надежно но медленнее)
+type ClickHousePoolConfig struct {
+	ConnectTimeout    int `yaml:"connect_timeout"`
+	MaxBatchSize      int `yaml:"max_batch_size"`
 	ReplicationFactor int `yaml:"replication_factor"`
+}
+
+type RetryConfig struct {
+	MaxAttempts  int           `yaml:"max_attempts"`
+	InitialDelay time.Duration `yaml:"initial_delay"`
+	MaxDelay     time.Duration `yaml:"max_delay"`
+	Multiplier   float64       `yaml:"multiplier"`
 }
 
 // Load загружает конфигурацию из YAML файла.
@@ -183,12 +243,22 @@ func Load(path string) (*Config, error) {
 func defaultConfig() *Config {
 	return &Config{
 		Logging: LogConfig{
-			Level:         "info",
-			Dir:           "./logs",
-			MaxFileSizeMB: 10,
-			MaxBackups:    10,
-			MaxAgeDays:    30,
-			Compress:      false,
+			Level:              "info",
+			Format:             "json",
+			Dir:                "/var/log/trader",
+			ErrorPath:          "/var/log/trader/error.log",
+			OutRequestPath:     "/var/log/trader/out_request.log",
+			WSInPath:           "/var/log/trader/ws_in.log",
+			WSOutPath:          "/var/log/trader/ws_out.log",
+			AuditPath:          "/var/log/trader/audit.log",
+			MaxFileSizeMB:      10,
+			MaxBackups:         10,
+			MaxAgeDays:         30,
+			Compress:           false,
+			OutRequestToStdout: true,
+			WSInToStdout:       true,
+			WSOutToStdout:      true,
+			AuditToStdout:      true,
 		},
 		Trade: TradeConfig{UpdateInterval: 5},
 		OrderBook: OrderBookConfig{
@@ -211,17 +281,30 @@ func defaultConfig() *Config {
 			SlippagePercent:        0.5,
 			EnableBacktest:         false,
 		},
-		ClickHouse: ClickHouseConfig{
-			Host:              "localhost",
-			Port:              8123,
-			Database:          "crypto",
-			UseTLS:            false,
-			TLSSkipVerify:     false,
-			ConnectTimeout:    10,
-			MaxRetries:        3,
-			Compression:       true,
-			MaxBatchSize:      10000,
-			ReplicationFactor: 1,
+		Databases: DatabasesConfig{
+			System: DatabaseTargetConfig{Engine: ""},
+			Audit:  DatabaseTargetConfig{Engine: ""},
+			Quotes: DatabaseTargetConfig{
+				Engine: "clickhouse",
+				ClickHouse: ClickHouseConfig{
+					Host:     "localhost",
+					Port:     8123,
+					Database: "crypto",
+					TLS:      TLSConfig{Enabled: false, SkipVerify: false},
+					Pool: ClickHousePoolConfig{
+						ConnectTimeout:    10,
+						MaxBatchSize:      10000,
+						ReplicationFactor: 1,
+					},
+					Retry: RetryConfig{
+						MaxAttempts:  3,
+						InitialDelay: 1 * time.Second,
+						MaxDelay:     5 * time.Second,
+						Multiplier:   2.0,
+					},
+					Compression: true,
+				},
+			},
 		},
 	}
 }
@@ -230,8 +313,26 @@ func applyDefaults(c *Config) {
 	if c.Logging.Level == "" {
 		c.Logging.Level = "info"
 	}
+	if c.Logging.Format == "" {
+		c.Logging.Format = "json"
+	}
 	if c.Logging.Dir == "" {
-		c.Logging.Dir = "./logs"
+		c.Logging.Dir = "/var/log/trader"
+	}
+	if c.Logging.ErrorPath == "" {
+		c.Logging.ErrorPath = filepath.Join(c.Logging.Dir, "error.log")
+	}
+	if c.Logging.OutRequestPath == "" {
+		c.Logging.OutRequestPath = filepath.Join(c.Logging.Dir, "out_request.log")
+	}
+	if c.Logging.WSInPath == "" {
+		c.Logging.WSInPath = filepath.Join(c.Logging.Dir, "ws_in.log")
+	}
+	if c.Logging.WSOutPath == "" {
+		c.Logging.WSOutPath = filepath.Join(c.Logging.Dir, "ws_out.log")
+	}
+	if c.Logging.AuditPath == "" {
+		c.Logging.AuditPath = filepath.Join(c.Logging.Dir, "audit.log")
 	}
 	if c.Logging.MaxFileSizeMB == 0 {
 		c.Logging.MaxFileSizeMB = 10
@@ -283,26 +384,38 @@ func applyDefaults(c *Config) {
 		c.Trader.SlippagePercent = 0.5
 	}
 
-	if c.ClickHouse.Host == "" {
-		c.ClickHouse.Host = "localhost"
+	if c.Databases.Quotes.Engine == "" {
+		c.Databases.Quotes.Engine = "clickhouse"
 	}
-	if c.ClickHouse.Port == 0 {
-		c.ClickHouse.Port = 8123
+	if c.Databases.Quotes.ClickHouse.Host == "" {
+		c.Databases.Quotes.ClickHouse.Host = "localhost"
 	}
-	if c.ClickHouse.Database == "" {
-		c.ClickHouse.Database = "crypto"
+	if c.Databases.Quotes.ClickHouse.Port == 0 {
+		c.Databases.Quotes.ClickHouse.Port = 8123
 	}
-	if c.ClickHouse.ConnectTimeout == 0 {
-		c.ClickHouse.ConnectTimeout = 10
+	if c.Databases.Quotes.ClickHouse.Database == "" {
+		c.Databases.Quotes.ClickHouse.Database = "crypto"
 	}
-	if c.ClickHouse.MaxRetries == 0 {
-		c.ClickHouse.MaxRetries = 3
+	if c.Databases.Quotes.ClickHouse.Pool.ConnectTimeout == 0 {
+		c.Databases.Quotes.ClickHouse.Pool.ConnectTimeout = 10
 	}
-	if c.ClickHouse.MaxBatchSize == 0 {
-		c.ClickHouse.MaxBatchSize = 10000
+	if c.Databases.Quotes.ClickHouse.Retry.MaxAttempts == 0 {
+		c.Databases.Quotes.ClickHouse.Retry.MaxAttempts = 3
 	}
-	if c.ClickHouse.ReplicationFactor == 0 {
-		c.ClickHouse.ReplicationFactor = 1
+	if c.Databases.Quotes.ClickHouse.Retry.InitialDelay == 0 {
+		c.Databases.Quotes.ClickHouse.Retry.InitialDelay = 1 * time.Second
+	}
+	if c.Databases.Quotes.ClickHouse.Retry.MaxDelay == 0 {
+		c.Databases.Quotes.ClickHouse.Retry.MaxDelay = 5 * time.Second
+	}
+	if c.Databases.Quotes.ClickHouse.Retry.Multiplier == 0 {
+		c.Databases.Quotes.ClickHouse.Retry.Multiplier = 2.0
+	}
+	if c.Databases.Quotes.ClickHouse.Pool.MaxBatchSize == 0 {
+		c.Databases.Quotes.ClickHouse.Pool.MaxBatchSize = 10000
+	}
+	if c.Databases.Quotes.ClickHouse.Pool.ReplicationFactor == 0 {
+		c.Databases.Quotes.ClickHouse.Pool.ReplicationFactor = 1
 	}
 }
 
@@ -310,24 +423,43 @@ func applyEnvOverrides(c *Config) {
 	c.Role = envString("TRADER_ROLE", c.Role)
 
 	c.Logging.Level = envString("TRADER_LOG_LEVEL", c.Logging.Level)
+	c.Logging.Format = envString("TRADER_LOG_FORMAT", c.Logging.Format)
 	c.Logging.Dir = envString("TRADER_LOG_DIR", c.Logging.Dir)
+	c.Logging.ErrorPath = envString("TRADER_LOG_ERROR_PATH", c.Logging.ErrorPath)
+	c.Logging.OutRequestPath = envString("TRADER_LOG_OUT_REQUEST_PATH", c.Logging.OutRequestPath)
+	c.Logging.WSInPath = envString("TRADER_LOG_WS_IN_PATH", c.Logging.WSInPath)
+	c.Logging.WSOutPath = envString("TRADER_LOG_WS_OUT_PATH", c.Logging.WSOutPath)
+	c.Logging.AuditPath = envString("TRADER_LOG_AUDIT_PATH", c.Logging.AuditPath)
 	c.Logging.MaxFileSizeMB = envInt("TRADER_LOG_MAX_SIZE_MB", c.Logging.MaxFileSizeMB)
 	c.Logging.MaxBackups = envInt("TRADER_LOG_MAX_BACKUPS", c.Logging.MaxBackups)
 	c.Logging.MaxAgeDays = envInt("TRADER_LOG_MAX_AGE_DAYS", c.Logging.MaxAgeDays)
 	c.Logging.Compress = envBool("TRADER_LOG_COMPRESS", c.Logging.Compress)
+	c.Logging.OutRequestToStdout = envBool("TRADER_LOG_OUT_REQUEST_TO_STDOUT", c.Logging.OutRequestToStdout)
+	c.Logging.WSInToStdout = envBool("TRADER_LOG_WS_IN_TO_STDOUT", c.Logging.WSInToStdout)
+	c.Logging.WSOutToStdout = envBool("TRADER_LOG_WS_OUT_TO_STDOUT", c.Logging.WSOutToStdout)
+	c.Logging.AuditToStdout = envBool("TRADER_LOG_AUDIT_TO_STDOUT", c.Logging.AuditToStdout)
 
 	c.OrderBook.DebugLogRaw = envBool("TRADER_ORDERBOOK_DEBUG_LOG_RAW", c.OrderBook.DebugLogRaw)
 	c.OrderBook.DebugLogMsg = envBool("TRADER_ORDERBOOK_DEBUG_LOG_MSG", c.OrderBook.DebugLogMsg)
 
-	c.ClickHouse.Host = envString("TRADER_CLICKHOUSE_HOST", c.ClickHouse.Host)
-	c.ClickHouse.Port = envInt("TRADER_CLICKHOUSE_PORT", c.ClickHouse.Port)
-	c.ClickHouse.Database = envString("TRADER_CLICKHOUSE_DATABASE", c.ClickHouse.Database)
-	c.ClickHouse.Username = envString("TRADER_CLICKHOUSE_USERNAME", c.ClickHouse.Username)
-	c.ClickHouse.Password = envString("TRADER_CLICKHOUSE_PASSWORD", c.ClickHouse.Password)
-	c.ClickHouse.UseTLS = envBool("TRADER_CLICKHOUSE_USE_TLS", c.ClickHouse.UseTLS)
-	c.ClickHouse.TLSSkipVerify = envBool("TRADER_CLICKHOUSE_TLS_SKIP_VERIFY", c.ClickHouse.TLSSkipVerify)
-	c.ClickHouse.ConnectTimeout = envInt("TRADER_CLICKHOUSE_CONNECT_TIMEOUT", c.ClickHouse.ConnectTimeout)
-	c.ClickHouse.MaxRetries = envInt("TRADER_CLICKHOUSE_MAX_RETRIES", c.ClickHouse.MaxRetries)
+	c.Databases.Quotes.Engine = envString("TRADER_DATABASES_QUOTES_ENGINE", c.Databases.Quotes.Engine)
+	c.Databases.Quotes.ClickHouse.Host = envString("TRADER_DATABASES_QUOTES_CLICKHOUSE_HOST", c.Databases.Quotes.ClickHouse.Host)
+	c.Databases.Quotes.ClickHouse.Port = envInt("TRADER_DATABASES_QUOTES_CLICKHOUSE_PORT", c.Databases.Quotes.ClickHouse.Port)
+	c.Databases.Quotes.ClickHouse.Database = envString("TRADER_DATABASES_QUOTES_CLICKHOUSE_DATABASE", c.Databases.Quotes.ClickHouse.Database)
+	c.Databases.Quotes.ClickHouse.Username = envString("TRADER_DATABASES_QUOTES_CLICKHOUSE_USERNAME", c.Databases.Quotes.ClickHouse.Username)
+	c.Databases.Quotes.ClickHouse.Password = envString("TRADER_DATABASES_QUOTES_CLICKHOUSE_PASSWORD", c.Databases.Quotes.ClickHouse.Password)
+	c.Databases.Quotes.ClickHouse.TLS.Enabled = envBool("TRADER_DATABASES_QUOTES_CLICKHOUSE_TLS_ENABLED", c.Databases.Quotes.ClickHouse.TLS.Enabled)
+	c.Databases.Quotes.ClickHouse.TLS.SkipVerify = envBool("TRADER_DATABASES_QUOTES_CLICKHOUSE_TLS_SKIP_VERIFY", c.Databases.Quotes.ClickHouse.TLS.SkipVerify)
+	c.Databases.Quotes.ClickHouse.TLS.CAPath = envString("TRADER_DATABASES_QUOTES_CLICKHOUSE_TLS_CA_PATH", c.Databases.Quotes.ClickHouse.TLS.CAPath)
+	c.Databases.Quotes.ClickHouse.TLS.CertPath = envString("TRADER_DATABASES_QUOTES_CLICKHOUSE_TLS_CERT_PATH", c.Databases.Quotes.ClickHouse.TLS.CertPath)
+	c.Databases.Quotes.ClickHouse.TLS.KeyPath = envString("TRADER_DATABASES_QUOTES_CLICKHOUSE_TLS_KEY_PATH", c.Databases.Quotes.ClickHouse.TLS.KeyPath)
+	c.Databases.Quotes.ClickHouse.Pool.ConnectTimeout = envInt("TRADER_DATABASES_QUOTES_CLICKHOUSE_POOL_CONNECT_TIMEOUT", c.Databases.Quotes.ClickHouse.Pool.ConnectTimeout)
+	c.Databases.Quotes.ClickHouse.Pool.MaxBatchSize = envInt("TRADER_DATABASES_QUOTES_CLICKHOUSE_POOL_MAX_BATCH_SIZE", c.Databases.Quotes.ClickHouse.Pool.MaxBatchSize)
+	c.Databases.Quotes.ClickHouse.Pool.ReplicationFactor = envInt("TRADER_DATABASES_QUOTES_CLICKHOUSE_POOL_REPLICATION_FACTOR", c.Databases.Quotes.ClickHouse.Pool.ReplicationFactor)
+	c.Databases.Quotes.ClickHouse.Retry.MaxAttempts = envInt("TRADER_DATABASES_QUOTES_CLICKHOUSE_RETRY_MAX_ATTEMPTS", c.Databases.Quotes.ClickHouse.Retry.MaxAttempts)
+	c.Databases.Quotes.ClickHouse.Retry.InitialDelay = envDuration("TRADER_DATABASES_QUOTES_CLICKHOUSE_RETRY_INITIAL_DELAY", c.Databases.Quotes.ClickHouse.Retry.InitialDelay)
+	c.Databases.Quotes.ClickHouse.Retry.MaxDelay = envDuration("TRADER_DATABASES_QUOTES_CLICKHOUSE_RETRY_MAX_DELAY", c.Databases.Quotes.ClickHouse.Retry.MaxDelay)
+	c.Databases.Quotes.ClickHouse.Retry.Multiplier = envFloat("TRADER_DATABASES_QUOTES_CLICKHOUSE_RETRY_MULTIPLIER", c.Databases.Quotes.ClickHouse.Retry.Multiplier)
 }
 
 func envString(key, fallback string) string {
@@ -360,6 +492,30 @@ func envBool(key string, fallback bool) bool {
 		return fallback
 	}
 	parsed, err := strconv.ParseBool(strings.TrimSpace(value))
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func envDuration(key string, fallback time.Duration) time.Duration {
+	value, ok := os.LookupEnv(key)
+	if !ok {
+		return fallback
+	}
+	parsed, err := time.ParseDuration(strings.TrimSpace(value))
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func envFloat(key string, fallback float64) float64 {
+	value, ok := os.LookupEnv(key)
+	if !ok {
+		return fallback
+	}
+	parsed, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
 	if err != nil {
 		return fallback
 	}

@@ -455,15 +455,34 @@ PRICE_SPOT_LOG    ~150 bytes           ~1 MB          ~150 GB 🔥
 ## 💾 Параметры подключения (из config.yaml)
 
 ```yaml
-database:
-     type: mysql                    # MySQL/PostgreSQL
-     host: localhost
-     port: 3306
-     username: ct_system_user
-     password: *****
-     database: ct_system
-     max_open_conns: 20             # Connection pool
-     max_idle_conns: 5
+databases:
+     system:
+          engine: mysql
+          mysql:
+               host: localhost
+               port: 3306
+               user: ct_system_user
+               password: *****
+               database: ct_system
+     audit:
+          engine: ""
+     quotes:
+          engine: clickhouse
+          clickhouse:
+               host: clickhouse.internal
+               port: 9000
+               database: analytics
+               username: default
+               password: *****
+               tls:
+                    enabled: true
+                    skip_verify: false
+               pool:
+                    connect_timeout: 10
+                    max_batch_size: 10000
+                    replication_factor: 2      # Для репликации в кластере
+               retry:
+                    max_attempts: 3
 
 role:
      type: both                     # monitor, trader, или both
@@ -471,14 +490,6 @@ role:
      trade_config_id: 1             # ID из TRADE таблицы
      daemon_name: prod-daemon-1     # Для DAEMON_STATE
 
-clickhouse:
-     host: clickhouse.internal
-     port: 9000
-     database: analytics
-     username: default
-     password: *****
-     max_batch_size: 10000
-     replication_factor: 2          # Для репликации в кластере
 ```
 
 ---

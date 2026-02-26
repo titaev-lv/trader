@@ -52,11 +52,20 @@ func main() {
 	// Поддерживает разные уровни: debug, info, warn, error
 	if err := logger.Init(
 		cfg.Logging.Level,
-		cfg.Logging.Dir,
+		cfg.Logging.Format,
 		cfg.Logging.MaxFileSizeMB,
 		cfg.Logging.MaxBackups,
 		cfg.Logging.MaxAgeDays,
 		cfg.Logging.Compress,
+		cfg.Logging.ErrorPath,
+		cfg.Logging.OutRequestPath,
+		cfg.Logging.WSInPath,
+		cfg.Logging.WSOutPath,
+		cfg.Logging.AuditPath,
+		cfg.Logging.OutRequestToStdout,
+		cfg.Logging.WSInToStdout,
+		cfg.Logging.WSOutToStdout,
+		cfg.Logging.AuditToStdout,
 	); err != nil {
 		fmt.Printf("Failed to init logger: %+v\n", err)
 		os.Exit(1)

@@ -55,7 +55,16 @@ cp conf/config.example.yaml conf/config.yaml
 ```yaml
 logging:
     level: debug             # debug, info, warn, error
-    dir: ./logs
+    format: json             # json, text
+    error_path: "/var/log/trader/error.log"
+    out_request_path: "/var/log/trader/out_request.log"
+    ws_in_path: "/var/log/trader/ws_in.log"
+    ws_out_path: "/var/log/trader/ws_out.log"
+    audit_path: "/var/log/trader/audit.log"
+    out_request_to_stdout: true
+    ws_in_to_stdout: true
+    ws_out_to_stdout: true
+    audit_to_stdout: true
 
 role: both                 # monitor, trader или both
 
@@ -70,12 +79,41 @@ trader:
     max_position_size: 1000.0  # USDT
     default_strategy: grid      # grid, dca, scalp
 
-clickhouse:
-    host: localhost
-    port: 8123
-    database: crypto
-    username: default
-    password: default
+databases:
+    system:
+        engine: ""
+    audit:
+        engine: ""
+    quotes:
+        engine: clickhouse
+        clickhouse:
+            host: localhost
+            port: 8123
+            database: crypto
+            username: default
+            password: default
+```
+
+ENV-переопределения для `databases.quotes.clickhouse`:
+```bash
+TRADER_DATABASES_QUOTES_ENGINE=clickhouse
+TRADER_DATABASES_QUOTES_CLICKHOUSE_HOST=clickhouse
+TRADER_DATABASES_QUOTES_CLICKHOUSE_PORT=8123
+TRADER_DATABASES_QUOTES_CLICKHOUSE_DATABASE=crypto
+TRADER_DATABASES_QUOTES_CLICKHOUSE_USERNAME=default
+TRADER_DATABASES_QUOTES_CLICKHOUSE_PASSWORD=default
+TRADER_DATABASES_QUOTES_CLICKHOUSE_TLS_ENABLED=false
+TRADER_DATABASES_QUOTES_CLICKHOUSE_TLS_SKIP_VERIFY=false
+TRADER_DATABASES_QUOTES_CLICKHOUSE_TLS_CA_PATH=
+TRADER_DATABASES_QUOTES_CLICKHOUSE_TLS_CERT_PATH=
+TRADER_DATABASES_QUOTES_CLICKHOUSE_TLS_KEY_PATH=
+TRADER_DATABASES_QUOTES_CLICKHOUSE_POOL_CONNECT_TIMEOUT=10
+TRADER_DATABASES_QUOTES_CLICKHOUSE_POOL_MAX_BATCH_SIZE=10000
+TRADER_DATABASES_QUOTES_CLICKHOUSE_POOL_REPLICATION_FACTOR=1
+TRADER_DATABASES_QUOTES_CLICKHOUSE_RETRY_MAX_ATTEMPTS=3
+TRADER_DATABASES_QUOTES_CLICKHOUSE_RETRY_INITIAL_DELAY=1s
+TRADER_DATABASES_QUOTES_CLICKHOUSE_RETRY_MAX_DELAY=5s
+TRADER_DATABASES_QUOTES_CLICKHOUSE_RETRY_MULTIPLIER=2.0
 ```
 
 ---
