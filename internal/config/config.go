@@ -41,16 +41,7 @@ type DatabasesConfig struct {
 type DatabaseTargetConfig struct {
 	Engine     string           `yaml:"engine"`
 	ClickHouse ClickHouseConfig `yaml:"clickhouse"`
-	MySQL      MySQLConfig      `yaml:"mysql"`
 	PostgreSQL PostgreSQLConfig `yaml:"postgresql"`
-}
-
-type MySQLConfig struct {
-	Host     string `yaml:"host"`
-	Port     int    `yaml:"port"`
-	User     string `yaml:"user"`
-	Password string `yaml:"password"`
-	Database string `yaml:"database"`
 }
 
 type PostgreSQLConfig struct {
@@ -171,7 +162,7 @@ type TraderConfig struct {
 
 // ClickHouseConfig - конфигурация для подключения к ClickHouse
 // ClickHouse используется для хранения больших объемов исторических данных
-// В отличие от MySQL, ClickHouse оптимизирована для аналитики и огромных датасетов
+// ClickHouse оптимизирована для аналитики и больших объемов данных
 type ClickHouseConfig struct {
 	// Host - адрес хоста ClickHouse
 	Host string `yaml:"host"`
