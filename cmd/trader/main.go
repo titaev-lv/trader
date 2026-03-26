@@ -88,8 +88,7 @@ func main() {
 	mgr := manager.New(cfg)
 
 	// 4. ЗАПУСК МЕНЕДЖЕРА
-	// Trader работает как outbound-клиент (WS/REST к CTS-Core и биржам)
-	// и не поднимает локальный HTTP сервер для входящих команд.
+	// Trader работает как outbound-клиент (WS/REST к CTS-Core и биржам).
 	if err := mgr.Start(); err != nil {
 		log.Error("Failed to start manager", "error", err)
 		os.Exit(1)

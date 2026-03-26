@@ -9,7 +9,7 @@
 ### 1.1 Реализовано
 
 - Базовый bootstrap: `config -> logger -> manager -> graceful shutdown`
-- Outbound-only модель процесса (без локального HTTP API)
+- Outbound-first модель процесса
 - Конфигурация из YAML + env overrides
 - Многопоточное логирование (`error`, `out_request`, `ws_in`, `ws_out`, `audit`) с ротацией
 - Базовые доменные типы для бирж/рынков/задач
