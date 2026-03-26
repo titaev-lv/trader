@@ -64,7 +64,6 @@ internal/task/subscription_manager.go
 ## Документация
 
 - `ARCHITECTURE.md`: фактическая архитектура и зоны развития
-- `CODE_STRUCTURE.md`: назначение модулей и степень готовности
 - `DEVELOPMENT_PLAN.md`: обновленный план с честными статусами
 
 ## Примечание
