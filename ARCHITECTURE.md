@@ -1,7 +1,7 @@
 # Trader Architecture
 
-> Версия документа: 2.1.0
-> Обновлено: 2026-03-26
+> Версия документа: 2.2.0
+> Обновлено: 2026-03-28
 > Статус: актуализирован под текущее состояние кода
 
 ## Оглавление
@@ -22,7 +22,7 @@
 
 ## 0. Статус реализации
 
-Срез по коду на 2026-03-26:
+Срез по коду на 2026-03-28:
 
 - Реализовано:
 	- bootstrap `config -> logger -> manager -> graceful shutdown`
@@ -52,7 +52,8 @@
 - поддерживать биржевые подключения
 - обрабатывать рыночные события
 - исполнять торговые решения в рамках локальной стратегии
-- отправлять телеметрию и результаты исполнения обратно в `cts-core`
+- отправлять подтверждения, диагностику и heartbeat в `cts-core` по WS
+- отправлять результаты исполнения в `cts-core` по WS (`trade.result`/`monitor.result`)
 
 Ограничение текущего этапа: в кодовой базе готова только часть этого контура.
 
@@ -63,8 +64,12 @@
 1. `trader` работает как outbound клиент.
 2. Логирование унифицировано с остальными сервисами CT-System: JSON + file streams.
 3. Текущий WS модуль в `internal/core/ws` используется как orchestration/logging слой, а не как финальный transport runtime.
-4. Задачи представлены через внутренние модели и diff/apply механику без привязки документации к конкретной СУБД.
-5. Приоритет документации: фактический код > roadmap описания.
+4. Задачи представлены через внутренние модели и diff/apply механику.
+5. Канал `trader <-> cts-core` по WS включает команды, подтверждения, диагностику и heartbeat.
+6. Результаты исполнения (`trade.result`, `monitor.result`) передаются в `cts-core` через WS-события.
+7. `hsm-service` используется только для расшифровки ключей бирж.
+8. `mysql` рассматривается как системное хранилище (задачи, состояние, результаты, служебные данные).
+9. Приоритет документации: фактический код > roadmap описания.
 
 ---
 
@@ -111,23 +116,28 @@ flowchart TB
 
 ```mermaid
 flowchart LR
-		CORE[CTS-Core]
-		TR[Trader Runtime]
-		EXCH[Exchanges]
-		HSM[HSM Service]
+		CORE["CTS-Core\nWS и REST API"]
+		TR["Trader Runtime<br/>самостоятельная торговля по задачам"]
+		EXCH["Exchanges<br/>рынок и ордера"]
+		HSM["HSM Service<br/>расшифровка ключей бирж"]
+		MYSQL[(MySQL)]
 		Q[(Quotes Storage)]
 
-		CORE <--> TR
-		TR <--> EXCH
-		TR <--> HSM
-		TR --> Q
+		CORE <-->|WS: register, heartbeat, tasks, results, diagnostics| TR
+		CORE <-->|задачи, состояние системы, результаты, служебные данные| MYSQL
+		TR <-->|рыночные потоки и ордера| EXCH
+		TR -->|запрос на расшифровку ключей бирж| HSM
+		HSM -->|расшифрованные ключи| TR
+		TR -->|рыночные данные| Q
 ```
 
 Целевое поведение:
 
-- `cts-core` задает workload и принимает heartbeat/metrics/result events
-- `trader` держит market connectivity и execution loop
-- `hsm-service` используется для криптографических операций по доступу к секретам
+- `cts-core` и `trader` работают через единый WS-канал команд и операционной телеметрии
+- `trader` самостоятельно исполняет торговые действия по полученным задачам
+- результаты исполнения отправляются из `trader` в `cts-core` по WS-событиям (`trade.result`, `monitor.result`)
+- `hsm-service` используется только для расшифровки ключей бирж
+- `mysql` хранит системные данные (`задачи`, `состояние`, `результаты`, служебные записи)
 - рыночные данные и/или агрегаты отправляются в quotes storage
 
 ---
@@ -152,6 +162,8 @@ flowchart LR
 	- subscribe/unsubscribe API, correlation map, TTL cleanup
 - `internal/task/types.go`
 	- общая модель входных задач
+- `internal/task/source.go`
+	- источник задач + уведомления об изменениях (`GetTasks`, `Watch`, `SetTasks`)
 - `internal/task/subscription_manager.go`
 	- diff/apply подписок
 
@@ -169,12 +181,13 @@ flowchart LR
 Текущие и целевые каналы:
 
 1. `trader <-> cts-core`
-	- текущий этап: закладывается WS lifecycle contract
-	- цель: `register`, `heartbeat`, `task flow`, `result flow`
+	- WS-канал: `trader.register`, `trader.heartbeat`, `metrics.report`, `task.*`, `trade.result`, `monitor.result`, диагностика
 2. `trader <-> exchanges`
 	- цель: WS market data + REST order execution
 3. `trader <-> hsm-service`
-	- цель: криптооперации для защищенного доступа к секретам
+	- цель: расшифровка ключей бирж
+4. `cts-core <-> mysql`
+	- системное хранение задач, состояния, результатов и служебных данных
 
 ---
 

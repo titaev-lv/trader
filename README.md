@@ -22,6 +22,7 @@ Go-сервис для outbound-интеграции с CTS-Core и биржев
 - `internal/core/messaging/message.go`: общие структуры сообщений
 - `internal/core/ws/ws.go`: уровень логирования/корреляции WS-событий (`event_id`/`request_id`), TTL-cleanup
 - `internal/task/types.go`: структуры задач для orchestration слоя
+- `internal/task/source.go`: источник задач и событийные уведомления (`GetTasks`/`Watch`/`SetTasks`)
 - `internal/task/subscription_manager.go`: diff и применение подписок через WS pool
 
 ## Что пока не реализовано полностью
@@ -46,6 +47,13 @@ go build -o trader cmd/trader/main.go
 ./trader -c conf/config.yaml
 ```
 
+## Контракт взаимодействия с CTS-Core
+
+- Основной runtime-канал `trader <-> cts-core`: WebSocket.
+- По WS передаются: `trader.register`, `trader.heartbeat`, `metrics.report`, `task.*`, `trade.result`, `monitor.result`, диагностика.
+- `trader` не пишет runtime-данные напрямую в MySQL; запись идет через `cts-core`.
+- REST в экосистеме сохраняется для control-plane и recovery/replay сценариев, но не как основной hot path для runtime доставки результатов от `trader`.
+
 ## Структура проекта (актуальная)
 
 ```text
@@ -58,6 +66,7 @@ internal/core/exchange/types.go
 internal/core/messaging/message.go
 internal/core/ws/ws.go
 internal/task/types.go
+internal/task/source.go
 internal/task/subscription_manager.go
 ```
 
