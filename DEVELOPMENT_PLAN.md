@@ -1,117 +1,112 @@
 # Trader - Development Plan
 
-> Версия документа: 2.0
-> Дата актуализации: 2026-03-26
-> Назначение: план развития, синхронизированный с текущим кодом
+> Версия: 3.1
+> Дата: 2026-03-27
+> Формат: короткий рабочий план без сроков
 
-## 1. Фактический статус
+## 1. Цель
 
-### 1.1 Реализовано
+Собрать `trader` в рабочий контур: получение задач от `cts-core`, обработка рыночных данных, исполнение задач и отправка результата обратно.
 
-- Базовый bootstrap: `config -> logger -> manager -> graceful shutdown`
-- Outbound-first модель процесса
-- Конфигурация из YAML + env overrides
-- Многопоточное логирование (`error`, `out_request`, `ws_in`, `ws_out`, `audit`) с ротацией
-- Базовые доменные типы для бирж/рынков/задач
-- Subscription diff/apply слой
-- WS correlation layer (`event_id`, `request_id`, TTL cleanup)
-- Task models (`internal/task/types.go`) для orchestration-пайплайна
+## 2. Базовый статус
 
-### 1.2 Частично реализовано
+Сделано:
 
-- Orchestration manager существует, но запуск прикладных подсистем пока не собран в полный рабочий контур
-- WS-подсистема закрывает logging/correlation use-case, но не завершена как полноценный transport-level engine
-- Trader-модули есть, но интеграция в непрерывный pipeline частичная
+- стартовый каркас (`config -> logger -> manager -> shutdown`)
+- модели задач и diff/apply подписок
+- WS orchestration/logging слой
+- унифицированные логи (`error/out_request/ws_in/ws_out/audit`)
 
-### 1.3 Пока не реализовано
+Не сделано:
 
-- Полный runtime для торговых стратегий и исполнения ордеров
-- Production-ready exchange драйверы
-- End-to-end monitor pipeline с записью рыночных данных в ClickHouse
-- Полный e2e поток интеграции с CTS-Core по задачам/телеметрии
+- полноценный exchange transport
+- execution pipeline
+- monitor pipeline записи market data
+- полная runtime-связка модулей внутри manager
 
-## 2. План работ
+## 3. Обязательные контракты
 
-### Phase A - Runtime wiring (приоритет высокий)
+1. Контракт с `cts-core`:
+   - `trader.register -> trader.register_ack`
+   - `trader.heartbeat`
+   - корректная обработка protocol/version/errors
+2. Runtime-поведение:
+   - `cts-core` выбирает исполнителя
+   - решение `buy/sell` принимает `trader`
+3. Логирование:
+   - JSON + correlation (`request_id/event_id`)
+4. Тестирование:
+   - service-local -> minimal integration -> full E2E
 
-Цель: собрать существующие модули в единый запущенный пайплайн.
+## 4. План работ
 
-Задачи:
+### Step 1. Runtime Wiring
 
-- Подключить источник задач в manager lifecycle
-- Подключить `SubscriptionManager` и WS apply loop
-- Ввести единый health/status отчет по активным подсистемам
+Сделать рабочий цикл `sync -> diff -> apply` и подключить его в manager.
 
-Критерий готовности:
+Готово, когда:
 
-- После старта сервиса в логах видны циклы sync -> diff -> apply
+- цикл стабильно виден в логах
+- корректный старт/стоп без утечек goroutine
 
-### Phase B - Exchange transport and adapters
+### Step 2. Protocol Compliance
 
-Цель: перейти от логического слоя к реальным биржевым подключениям.
+Довести WS-клиент до совместимости с `cts-core`.
 
-Задачи:
+Готово, когда:
 
-- Реализовать transport слой WS подключений
-- Добавить первый production-коннектор (например, Binance spot)
-- Нормализовать входящие market-data сообщения в `core/messaging`
+- проходит lifecycle smoke (`register`, `heartbeat`, reconnect)
+- корректно обрабатываются `INVALID_PAYLOAD`, `UNSUPPORTED_VERSION`, `RATE_LIMITED`
 
-Критерий готовности:
+### Step 3. Exchange Transport
 
-- Реальные подписки и прием данных хотя бы с одной биржи
-- Автовосстановление соединения после обрыва
+Сделать реальное подключение минимум к одной бирже и восстановление после обрыва.
 
-### Phase C - Monitor pipeline
+Готово, когда:
 
-Цель: реализовать рабочий контур сбора и сохранения рыночных данных.
+- стабильный прием market data в длительном прогоне
+- после reconnect подписки восстанавливаются автоматически
 
-Задачи:
+### Step 4. Monitor Pipeline
 
-- Буферизация рыночных событий
-- Батч-запись в quotes хранилище
-- Контроль качества данных (дубликаты, задержки, пропуски)
+Сделать буферизацию и запись market data в quotes storage.
 
-Критерий готовности:
+Готово, когда:
 
-- Стабильная запись данных в хранилище в течение длительного прогона
+- запись стабильна
+- видны метрики/логи по throughput, lag, drop
 
-### Phase D - Trader execution pipeline
+### Step 5. Trade Execution
 
-Цель: запуск минимально жизнеспособного торгового контура.
+Сделать минимальный рабочий контур исполнения задач.
 
-Задачи:
+Готово, когда:
 
-- Связать trading tasks с execution engine
-- Реализовать базовую стратегию и риск-ограничения
+- выполняется цикл `task -> execute -> result`
+- повторная доставка команды не вызывает двойное исполнение
 
-Критерий готовности:
+### Step 6. Reliability
 
-- От получения задачи до фиксации результата в БД проходит полный цикл
+Закрыть эксплуатационные риски в multi-instance сценарии.
 
-### Phase E - CTS-Core integration hardening
+Готово, когда:
 
-Цель: довести интеграционный контракт до production-ready уровня.
+- full-system E2E проходит в compose
+- документация и runtime не расходятся
 
-Задачи:
+## 5. Quality Gates
 
-- Полная поддержка heartbeat/metrics/reporting
-- Нагрузочные и отказоустойчивые тесты
-- Валидация поведения в multi-instance сценариях
+- `go test ./...` и сборка бинарника проходят
+- WS lifecycle совместим с `cts-core`
+- JSON/correlation логи присутствуют
+- graceful shutdown корректный при штатном стопе и сбоях сети
 
-Критерий готовности:
+## 6. Definition of Done
 
-- Успешный end-to-end прогон в составе CT-System
+Ближайший релиз готов, если одновременно выполнено:
 
-## 3. Технический долг
-
-- Сократить дублирование комментариев и устаревшие формулировки в коде
-- Выравнять стиль ошибок и лог-сообщений
-- Добавить unit/integration тесты для task/ws/manager связки
-
-## 4. Definition of Done для ближайшего релиза
-
-Ближайший релиз считается готовым, когда одновременно выполнены условия:
-
-- manager реально запускает task/ws/state подсистемы
-- подтвержден fetch/diff/apply цикл на тестовом стенде
-- документация не содержит утверждений о несуществующих production-компонентах
+- рабочий runtime loop `sync -> diff -> apply`
+- совместимый WS lifecycle с `cts-core`
+- минимум один production-like exchange path
+- рабочий контур `task -> execute -> result`
+- тесты и логирование соответствуют root-контракту CT-System
