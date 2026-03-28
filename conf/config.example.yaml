@@ -22,6 +22,19 @@ orderbook:
   debug_log_raw: false
   debug_log_msg: false
 
+core_connections:
+  ws:
+    enabled: false
+    url: "ws://localhost:8081/ws"
+    reconnect_delay_sec: 5
+    heartbeat_interval_sec: 5
+    trader_id: "trader-local"
+    version: "2.0.2"
+    region: "local"
+  rest:
+    enabled: false
+    url: "http://localhost:8081/api/v1"
+
 databases:
   quotes:
     engine: clickhouse

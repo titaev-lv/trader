@@ -1,8 +1,3 @@
-// Package manager содержит основную логику управления демоном
-// Manager отвечает за:
-// - Управление lifecycle приложения (старт, остановка, перезагрузка)
-// - Синхронизацию между компонентами (Monitor, Trader, TaskFetcher и т.д.)
-// - Обработку context для корректного завершения всех goroutine
 package manager
 
 import (
@@ -13,87 +8,94 @@ import (
 	"time"
 
 	"trader/internal/config"
+	"trader/internal/core/ctscorews"
+	"trader/internal/core/ws"
 	"trader/internal/logger"
 	"trader/internal/state"
-	//"daemon2/internal/collectorevents"
-	//"daemon2/internal/exchange"
-	//"daemon2/internal/trade"
-	//"daemon2/internal/tradedata"
+	"trader/internal/task"
 )
 
-// Ошибки для управления состоянием
 var (
-	// ErrAlreadyRunning - попытка запустить уже работающий менеджер
-	ErrAlreadyRunning = errors.New("system is already running")
-	// ErrNotRunning - попытка остановить не работающий менеджер
-	ErrNotRunning = errors.New("system is not running")
+	ErrAlreadyRunning         = errors.New("system is already running")
+	ErrNotRunning             = errors.New("system is not running")
+	ErrTaskUpdateNotSupported = errors.New("task source does not support updates")
 )
 
-// Manager - центральный координатор всех компонентов системы
-// Координирует работу всех компонентов и управляет их жизненным циклом
 type Manager struct {
-	cfg *config.Config
-	//	tradeData    *tradedata.Monitor
-	//	exchangeExec *exchange.Monitor
-	//	collector    *collectorevents.Monitor
-	//	trade        *trade.Monitor
-	// ctx/cancel - контекст для сигнализации о необходимости выключения всем goroutine
-	ctx    context.Context
-	cancel context.CancelFunc
-	// wg - WaitGroup для отслеживания всех запущенных goroutine
-	// Используется для корректного завершения при shutdown
-	wg sync.WaitGroup
-	// shutdownOnce - гарантирует что shutdown выполнится только один раз
-	shutdownOnce sync.Once
-	// isRunning - флаг текущего состояния (запущен или остановлен)
+	cfg       *config.Config
+	ctx       context.Context
+	cancel    context.CancelFunc
+	wg        sync.WaitGroup
+	mu        sync.RWMutex
 	isRunning bool
-	// mu - мьютекс для защиты access к полям при многопоточности
-	mu sync.RWMutex
-	// startTime - время когда менеджер был запущен
-	startTime time.Time
-	// shutdownTime - время когда менеджер был остановлен
+
+	startTime    time.Time
 	shutdownTime time.Time
-	// shutdownError - ошибка если произошла при shutdown
-	shutdownError error
+	shutdownErr  error
+
+	loopInterval time.Duration
+	loopSource   task.Source
+	loopSubMgr   *task.SubscriptionManager
+	coreWSClient *ctscorews.Client
+
+	snapMu    sync.RWMutex
+	snapshot  RuntimeSnapshot
+	iteration int64
 }
 
-// GracefulShutdownTimeout - максимальное время для корректного завершения всех goroutine
-// После этого они будут принудительно завершены
 const (
 	GracefulShutdownTimeout = 30 * time.Second
 )
 
-// New - создает новый менеджер с указанной конфигурацией
-// Инициализирует контекст и состояние из сохраненного на диске
-func New(cfg *config.Config) *Manager {
-	// Создаем контекст который можно отменить (для shutdown)
-	ctx, cancel := context.WithCancel(context.Background())
+type RuntimeSnapshot struct {
+	Running         bool
+	Iteration       int64
+	LastTrigger     string
+	LastSyncAt      *time.Time
+	LastDiffAt      *time.Time
+	LastApplyAt     *time.Time
+	LastSuccessAt   *time.Time
+	LastError       string
+	LastErrorStage  string
+	LastSubscribe   int
+	LastUnsubscribe int
+}
 
-	// Инициализируем менеджер состояния (загружает из диска если файл существует)
-	// Инициализируем менеджер состояния (загружает из диска если файл существует)
+func New(cfg *config.Config) *Manager {
+	ctx, cancel := context.WithCancel(context.Background())
 	stateMgr := state.GetInstance()
 	logger.Get("manager").Info("State manager initialized", "is_running", stateMgr.IsRunning())
 
-	//td := tradedata.NewMonitor(cfg)
-	//ee := exchange.NewMonitor(cfg)
-	//exchange.SetOrderBookConfig(cfg) // Initialize global config for exchange package
-	//ce := collectorevents.NewMonitor(cfg)
-	//t := trade.NewMonitor(cfg, td, ee)
+	wsPool := ws.NewPool()
+	loopSubMgr := task.NewSubscriptionManager(wsPool)
+	loopSource := task.NewStaticSource()
 
-	return &Manager{
-		cfg: cfg,
-		//	tradeData:    td,
-		//	exchangeExec: ee,
-		//	collector:    ce,
-		//	trade:        t,
-		ctx:    ctx,
-		cancel: cancel,
+	interval := time.Duration(cfg.Trade.UpdateInterval) * time.Second
+	if interval <= 0 {
+		interval = 5 * time.Second
 	}
+
+	m := &Manager{
+		cfg:          cfg,
+		ctx:          ctx,
+		cancel:       cancel,
+		loopInterval: interval,
+		loopSource:   loopSource,
+		loopSubMgr:   loopSubMgr,
+		snapshot: RuntimeSnapshot{
+			Running: false,
+		},
+	}
+
+	if cfg.CoreConnections.WS.Enabled && cfg.CoreConnections.WS.URL != "" {
+		m.coreWSClient = ctscorews.New(cfg.CoreConnections.WS, func(raw []byte) error {
+			return m.ApplyUpdateEnvelope(raw)
+		})
+	}
+
+	return m
 }
 
-// Start - запускает все компоненты системы
-// Возвращает ошибку если система уже работает
-// Устанавливает startTime и сохраняет состояние в файл
 func (m *Manager) Start() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -103,37 +105,39 @@ func (m *Manager) Start() error {
 		return ErrAlreadyRunning
 	}
 
-	// Логируем что начинаем запуск
-	logger.Get("manager").Info("Starting system components...")
+	m.ctx, m.cancel = context.WithCancel(context.Background())
 	m.isRunning = true
 	m.startTime = time.Now()
+	m.shutdownErr = nil
 
-	// Сохраняем состояние на диск (чтобы при перезагрузке демона он автоматически стартанул)
+	logger.Get("manager").Info("Starting runtime loop", "interval", m.loopInterval)
+
 	if err := state.GetInstance().SetRunning(true); err != nil {
 		logger.Get("manager").Error("Failed to persist running state", "error", err)
 	}
 
-	// Запускаем компоненты в порядке зависимостей
-	// Сначала те которые не зависят от других, потом те которые зависят
-	// m.tradeData.Start()
-	// logger.Get("manager").Debug("Trade data monitor started")
+	m.setSnapshot(func(s *RuntimeSnapshot) {
+		s.Running = true
+		s.LastError = ""
+		s.LastErrorStage = ""
+	})
 
-	// m.exchangeExec.Start()
-	// logger.Get("manager").Debug("Exchange executor monitor started")
+	m.wg.Add(1)
+	go m.runLoop()
 
-	// m.collector.Start()
-	// logger.Get("manager").Debug("Collector events monitor started")
+	if m.coreWSClient != nil {
+		m.wg.Add(1)
+		go func() {
+			defer m.wg.Done()
+			m.coreWSClient.Run(m.ctx)
+		}()
+		logger.Get("manager").Info("CTS-Core WS client started", "url", m.cfg.CoreConnections.WS.URL)
+	}
 
-	// m.trade.Start()
-	// logger.Get("manager").Debug("Trade monitor started")
-
-	logger.Get("manager").Info("All system components started successfully")
+	logger.Get("manager").Info("Runtime loop started")
 	return nil
 }
 
-// Stop - корректно останавливает все компоненты системы
-// Возвращает ошибку если система не работает
-// Сохраняет состояние shutdown в файл
 func (m *Manager) Stop() error {
 	m.mu.RLock()
 	isRunning := m.isRunning
@@ -144,103 +148,178 @@ func (m *Manager) Stop() error {
 		return ErrNotRunning
 	}
 
-	// shutdownOnce гарантирует что shutdown выполнится только один раз
-	// даже если Stop() вызовут несколько раз одновременно
-	m.shutdownOnce.Do(func() {
-		m.doStop()
-	})
-	return m.shutdownError
+	return m.doStop()
 }
 
-// doStop - выполняет фактическое завершение работы
-// Этап 1: помечает систему как остановленную
-// Этап 2: отправляет сигнал всем goroutine через cancel()
-// Этап 3: ждет их завершения с таймаутом
-// Этап 4: если не завершились - принудительно отменяет контекст
-func (m *Manager) doStop() {
+func (m *Manager) doStop() error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	if !m.isRunning {
+		m.mu.Unlock()
 		logger.Get("manager").Info("System not running, skipping shutdown")
-		return
+		return ErrNotRunning
 	}
-
-	logger.Get("manager").Info("Initiating graceful shutdown...", "timeout", GracefulShutdownTimeout)
 	m.isRunning = false
+	logger.Get("manager").Info("Initiating graceful shutdown...", "timeout", GracefulShutdownTimeout)
 	m.shutdownTime = time.Now()
+	cancel := m.cancel
+	m.mu.Unlock()
 
-	// Сохраняем на диск что система остановлена
 	if err := state.GetInstance().SetRunning(false); err != nil {
 		logger.Get("manager").Error("Failed to persist stopped state", "error", err)
 	}
 
-	// Создаем контекст с таймаутом для graceful shutdown
-	// После истечения таймаута система будет принудительно выключена
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), GracefulShutdownTimeout)
-	defer cancel()
+	if cancel != nil {
+		cancel()
+	}
 
-	// Канал для получения результата shutdown
-	done := make(chan error, 1)
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), GracefulShutdownTimeout)
+	defer waitCancel()
 
-	// Запускаем shutdown в отдельной goroutine чтобы иметь возможность таймаутировать
-	go m.shutdownComponents(done)
+	done := make(chan struct{})
+	go func() {
+		m.wg.Wait()
+		close(done)
+	}()
 
-	// Ждем либо завершения shutdown, либо истечения таймаута
 	select {
-	case err := <-done:
-		if err != nil {
-			m.shutdownError = err
-			logger.Get("manager").Error("Shutdown error", "error", err)
-		} else {
-			logger.Get("manager").Info("Graceful shutdown completed successfully")
+	case <-done:
+		logger.Get("manager").Info("Graceful shutdown completed successfully")
+		m.mu.Lock()
+		m.shutdownErr = nil
+		m.mu.Unlock()
+	case <-waitCtx.Done():
+		logger.Get("manager").Error("Shutdown timeout", "error", waitCtx.Err())
+		m.mu.Lock()
+		m.shutdownErr = waitCtx.Err()
+		m.mu.Unlock()
+	}
+
+	m.setSnapshot(func(s *RuntimeSnapshot) {
+		s.Running = false
+	})
+
+	m.mu.RLock()
+	err := m.shutdownErr
+	m.mu.RUnlock()
+	return err
+}
+
+func (m *Manager) runLoop() {
+	defer m.wg.Done()
+
+	log := logger.Get("manager.loop")
+	log.Info("runtime loop started")
+
+	watchCh := m.loopSource.Watch(m.ctx)
+	m.runIteration("startup")
+
+	ticker := time.NewTicker(m.loopInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-m.ctx.Done():
+			log.Info("runtime loop stopping")
+			return
+		case _, ok := <-watchCh:
+			if !ok {
+				watchCh = nil
+				continue
+			}
+			m.runIteration("event")
+		case <-ticker.C:
+			m.runIteration("reconcile")
 		}
-	case <-shutdownCtx.Done():
-		// Таймаут истек - все компоненты не завершились вовремя
-		m.shutdownError = shutdownCtx.Err()
-		logger.Get("manager").Error("Shutdown timeout, force stopping", "error", m.shutdownError)
-		// Принудительно отменяем контекст чтобы все goroutine выключились
-		m.cancel()
 	}
 }
 
-// shutdownComponents stops all components in reverse order
-func (m *Manager) shutdownComponents(done chan<- error) {
-	var lastErr error
-	log := logger.Get("manager")
+func (m *Manager) runIteration(trigger string) {
+	log := logger.Get("manager.loop")
 
-	// Stop components in reverse dependency order
-	// log.Info("Stopping trade monitor...")
-	// m.trade.Stop()
-	log.Info("SHUTDOWN MANAGER...")
-	// log.Info("Stopping collector events monitor...")
-	// m.collector.Stop()
+	m.iteration++
+	iteration := m.iteration
+	m.setSnapshot(func(s *RuntimeSnapshot) {
+		s.Iteration = iteration
+		s.LastTrigger = trigger
+	})
 
-	// log.Info("Stopping exchange executor monitor...")
-	// m.exchangeExec.Stop()
+	log.Info("sync started", "iteration", iteration, "trigger", trigger)
+	tasksData, err := m.loopSource.GetTasks(m.ctx)
+	syncAt := time.Now().UTC()
+	if err != nil {
+		m.recordLoopError("sync", err, iteration)
+		log.Error("sync failed", "iteration", iteration, "trigger", trigger, "error", err)
+		return
+	}
+	m.setSnapshot(func(s *RuntimeSnapshot) {
+		s.LastSyncAt = &syncAt
+	})
 
-	// log.Info("Stopping trade data monitor...")
-	// m.tradeData.Stop()
+	log.Info("diff started", "iteration", iteration, "trigger", trigger)
+	diff, err := m.loopSubMgr.Merge(tasksData)
+	diffAt := time.Now().UTC()
+	if err != nil {
+		m.recordLoopError("diff", err, iteration)
+		log.Error("diff failed", "iteration", iteration, "trigger", trigger, "error", err)
+		return
+	}
+	m.setSnapshot(func(s *RuntimeSnapshot) {
+		s.LastDiffAt = &diffAt
+	})
 
-	// Cancel main context after all components stopped
-	m.cancel()
+	log.Info("apply started", "iteration", iteration, "trigger", trigger, "to_subscribe", len(diff.ToSubscribe), "to_unsubscribe", len(diff.Unsubscribe))
+	if err := m.loopSubMgr.ApplyDiff(diff); err != nil {
+		m.recordLoopError("apply", err, iteration)
+		log.Error("apply failed", "iteration", iteration, "trigger", trigger, "error", err)
+		return
+	}
 
-	done <- lastErr
+	applyAt := time.Now().UTC()
+	m.setSnapshot(func(s *RuntimeSnapshot) {
+		s.LastApplyAt = &applyAt
+		s.LastSuccessAt = &applyAt
+		s.LastError = ""
+		s.LastErrorStage = ""
+		s.LastSubscribe = len(diff.ToSubscribe)
+		s.LastUnsubscribe = len(diff.Unsubscribe)
+	})
+
+	log.Info("iteration complete", "iteration", iteration, "trigger", trigger, "to_subscribe", len(diff.ToSubscribe), "to_unsubscribe", len(diff.Unsubscribe))
 }
 
-// Status returns the current system status
+func (m *Manager) recordLoopError(stage string, err error, iteration int64) {
+	m.setSnapshot(func(s *RuntimeSnapshot) {
+		s.Iteration = iteration
+		s.LastError = err.Error()
+		s.LastErrorStage = stage
+	})
+}
+
+func (m *Manager) setSnapshot(update func(*RuntimeSnapshot)) {
+	m.snapMu.Lock()
+	defer m.snapMu.Unlock()
+	update(&m.snapshot)
+}
+
 func (m *Manager) Status() map[string]interface{} {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
+	isRunning := m.isRunning
+	startTime := m.startTime
+	shutdownTime := m.shutdownTime
+	shutdownErr := m.shutdownErr
+	m.mu.RUnlock()
+
+	m.snapMu.RLock()
+	snapshot := m.snapshot
+	m.snapMu.RUnlock()
 
 	uptime := time.Duration(0)
-	if m.isRunning {
-		uptime = time.Since(m.startTime)
-	} else if !m.startTime.IsZero() {
-		uptime = m.shutdownTime.Sub(m.startTime)
+	if isRunning {
+		uptime = time.Since(startTime)
+	} else if !startTime.IsZero() {
+		uptime = shutdownTime.Sub(startTime)
 	}
 
-	// Format uptime as "1d 2h 23m 45s" with spaces
 	totalSeconds := int64(uptime.Seconds())
 	days := totalSeconds / 86400
 	hours := (totalSeconds % 86400) / 3600
@@ -248,7 +327,6 @@ func (m *Manager) Status() map[string]interface{} {
 	seconds := totalSeconds % 60
 
 	var uptimeStr string
-	// Форматируем uptime в понятный вид (дни, часы, минуты, секунды)
 	if days > 0 {
 		uptimeStr = fmt.Sprintf("%dd %dh %dm %ds", days, hours, minutes, seconds)
 	} else if hours > 0 {
@@ -259,42 +337,110 @@ func (m *Manager) Status() map[string]interface{} {
 		uptimeStr = fmt.Sprintf("%ds", seconds)
 	}
 
-	// Возвращаем информацию о статусе в виде map для REST API
 	return map[string]interface{}{
-		"running": m.isRunning,
+		"running": isRunning,
 		"uptime":  uptimeStr,
 		"start_time": func() interface{} {
-			if m.startTime.IsZero() {
+			if startTime.IsZero() {
 				return nil
 			}
-			return m.startTime
+			return startTime
 		}(),
 		"shutdown_time": func() interface{} {
-			if m.shutdownTime.IsZero() {
+			if shutdownTime.IsZero() {
 				return nil
 			}
-			return m.shutdownTime
+			return shutdownTime
 		}(),
-		"error": m.shutdownError,
+		"error": shutdownErr,
+		"runtime": map[string]interface{}{
+			"iteration":        snapshot.Iteration,
+			"last_trigger":     snapshot.LastTrigger,
+			"last_sync_at":     snapshot.LastSyncAt,
+			"last_diff_at":     snapshot.LastDiffAt,
+			"last_apply_at":    snapshot.LastApplyAt,
+			"last_success_at":  snapshot.LastSuccessAt,
+			"last_error":       snapshot.LastError,
+			"last_error_stage": snapshot.LastErrorStage,
+			"to_subscribe":     snapshot.LastSubscribe,
+			"to_unsubscribe":   snapshot.LastUnsubscribe,
+		},
 	}
 }
 
-// IsRunning - возвращает текущий статус (запущена ли система)
-// Потокобезопасный доступ с использованием RLock
 func (m *Manager) IsRunning() bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.isRunning
 }
 
-// GetContext - возвращает контекст менеджера для управления отменой
-// Используется компонентами для получения сигнала о необходимости завершения
 func (m *Manager) GetContext() context.Context {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	return m.ctx
 }
 
-func (m *Manager) Shutdown() {
-	m.Stop()
-	m.cancel()
-	m.wg.Wait()
+func (m *Manager) RuntimeSnapshot() RuntimeSnapshot {
+	m.snapMu.RLock()
+	defer m.snapMu.RUnlock()
+	return m.snapshot
+}
+
+func (m *Manager) UpdateTasks(data *task.TasksData) error {
+	if data == nil {
+		return nil
+	}
+
+	updater, ok := m.loopSource.(interface{ SetTasks(*task.TasksData) })
+	if !ok {
+		return ErrTaskUpdateNotSupported
+	}
+
+	updater.SetTasks(data)
+	logger.Get("manager").Info(
+		"tasks updated",
+		"monitoring_tasks", len(data.MonitoringTasks),
+		"trading_tasks", len(data.TradingTasks),
+	)
+
+	return nil
+}
+
+func (m *Manager) ApplyUpdateCommand(cmd task.UpdateCommand) error {
+	norm, err := cmd.Normalized()
+	if err != nil {
+		return err
+	}
+
+	if err := m.UpdateTasks(norm.Data); err != nil {
+		return err
+	}
+
+	logger.Get("manager").Info(
+		"task update command applied",
+		"mode", norm.Mode,
+		"source", norm.Source,
+		"request_id", norm.RequestID,
+		"monitoring_tasks", len(norm.Data.MonitoringTasks),
+		"trading_tasks", len(norm.Data.TradingTasks),
+	)
+
+	return nil
+}
+
+func (m *Manager) ApplyUpdateEnvelope(raw []byte) error {
+	base, err := m.loopSource.GetTasks(m.ctx)
+	if err != nil {
+		return err
+	}
+
+	cmd, err := task.DecodeUpdateCommandFromJSONWithBase(raw, base)
+	if err != nil {
+		return err
+	}
+	return m.ApplyUpdateCommand(cmd)
+}
+
+func (m *Manager) Shutdown() error {
+	return m.Stop()
 }

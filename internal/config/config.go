@@ -30,6 +30,28 @@ type Config struct {
 	Trader TraderConfig `yaml:"trader"`
 	// Databases - унифицированные подключения к хранилищам
 	Databases DatabasesConfig `yaml:"databases"`
+	// CoreConnections - подключения к CTS-Core (WS/REST)
+	CoreConnections CoreConnectionsConfig `yaml:"core_connections"`
+}
+
+type CoreConnectionsConfig struct {
+	WS   CoreWSConfig   `yaml:"ws"`
+	REST CoreRESTConfig `yaml:"rest"`
+}
+
+type CoreWSConfig struct {
+	Enabled              bool   `yaml:"enabled"`
+	URL                  string `yaml:"url"`
+	ReconnectDelaySec    int    `yaml:"reconnect_delay_sec"`
+	HeartbeatIntervalSec int    `yaml:"heartbeat_interval_sec"`
+	TraderID             string `yaml:"trader_id"`
+	Version              string `yaml:"version"`
+	Region               string `yaml:"region"`
+}
+
+type CoreRESTConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	URL     string `yaml:"url"`
 }
 
 type DatabasesConfig struct {
@@ -297,6 +319,21 @@ func defaultConfig() *Config {
 				},
 			},
 		},
+		CoreConnections: CoreConnectionsConfig{
+			WS: CoreWSConfig{
+				Enabled:              false,
+				URL:                  "ws://localhost:8081/ws",
+				ReconnectDelaySec:    5,
+				HeartbeatIntervalSec: 5,
+				TraderID:             "trader-local",
+				Version:              "2.0.2",
+				Region:               "local",
+			},
+			REST: CoreRESTConfig{
+				Enabled: false,
+				URL:     "http://localhost:8081/api/v1",
+			},
+		},
 	}
 }
 
@@ -408,6 +445,27 @@ func applyDefaults(c *Config) {
 	if c.Databases.Quotes.ClickHouse.Pool.ReplicationFactor == 0 {
 		c.Databases.Quotes.ClickHouse.Pool.ReplicationFactor = 1
 	}
+	if c.CoreConnections.WS.URL == "" {
+		c.CoreConnections.WS.URL = "ws://localhost:8081/ws"
+	}
+	if c.CoreConnections.WS.ReconnectDelaySec <= 0 {
+		c.CoreConnections.WS.ReconnectDelaySec = 5
+	}
+	if c.CoreConnections.WS.HeartbeatIntervalSec <= 0 {
+		c.CoreConnections.WS.HeartbeatIntervalSec = 5
+	}
+	if c.CoreConnections.WS.TraderID == "" {
+		c.CoreConnections.WS.TraderID = "trader-local"
+	}
+	if c.CoreConnections.WS.Version == "" {
+		c.CoreConnections.WS.Version = "2.0.2"
+	}
+	if c.CoreConnections.WS.Region == "" {
+		c.CoreConnections.WS.Region = "local"
+	}
+	if c.CoreConnections.REST.URL == "" {
+		c.CoreConnections.REST.URL = "http://localhost:8081/api/v1"
+	}
 }
 
 func applyEnvOverrides(c *Config) {
@@ -451,6 +509,17 @@ func applyEnvOverrides(c *Config) {
 	c.Databases.Quotes.ClickHouse.Retry.InitialDelay = envDuration("TRADER_DATABASES_QUOTES_CLICKHOUSE_RETRY_INITIAL_DELAY", c.Databases.Quotes.ClickHouse.Retry.InitialDelay)
 	c.Databases.Quotes.ClickHouse.Retry.MaxDelay = envDuration("TRADER_DATABASES_QUOTES_CLICKHOUSE_RETRY_MAX_DELAY", c.Databases.Quotes.ClickHouse.Retry.MaxDelay)
 	c.Databases.Quotes.ClickHouse.Retry.Multiplier = envFloat("TRADER_DATABASES_QUOTES_CLICKHOUSE_RETRY_MULTIPLIER", c.Databases.Quotes.ClickHouse.Retry.Multiplier)
+
+	c.CoreConnections.WS.Enabled = envBool("TRADER_CORE_CONNECTIONS_WS_ENABLED", c.CoreConnections.WS.Enabled)
+	c.CoreConnections.WS.URL = envString("TRADER_CORE_CONNECTIONS_WS_URL", c.CoreConnections.WS.URL)
+	c.CoreConnections.WS.ReconnectDelaySec = envInt("TRADER_CORE_CONNECTIONS_WS_RECONNECT_DELAY_SEC", c.CoreConnections.WS.ReconnectDelaySec)
+	c.CoreConnections.WS.HeartbeatIntervalSec = envInt("TRADER_CORE_CONNECTIONS_WS_HEARTBEAT_INTERVAL_SEC", c.CoreConnections.WS.HeartbeatIntervalSec)
+	c.CoreConnections.WS.TraderID = envString("TRADER_CORE_CONNECTIONS_WS_TRADER_ID", c.CoreConnections.WS.TraderID)
+	c.CoreConnections.WS.Version = envString("TRADER_CORE_CONNECTIONS_WS_VERSION", c.CoreConnections.WS.Version)
+	c.CoreConnections.WS.Region = envString("TRADER_CORE_CONNECTIONS_WS_REGION", c.CoreConnections.WS.Region)
+
+	c.CoreConnections.REST.Enabled = envBool("TRADER_CORE_CONNECTIONS_REST_ENABLED", c.CoreConnections.REST.Enabled)
+	c.CoreConnections.REST.URL = envString("TRADER_CORE_CONNECTIONS_REST_URL", c.CoreConnections.REST.URL)
 }
 
 func envString(key, fallback string) string {
