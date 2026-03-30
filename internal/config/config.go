@@ -101,10 +101,10 @@ type LogConfig struct {
 	ErrorPath string `yaml:"error_path"`
 	// OutRequestPath - путь к out_request.log
 	OutRequestPath string `yaml:"out_request_path"`
-	// WSInPath - путь к ws_in.log
-	WSInPath string `yaml:"ws_in_path"`
-	// WSOutPath - путь к ws_out.log
-	WSOutPath string `yaml:"ws_out_path"`
+	// WSCorePath - путь к ws_core.log (канал Trader <-> CTS-Core)
+	WSCorePath string `yaml:"ws_core_path"`
+	// WSExchangesPath - путь к ws_exchanges.log (канал Trader <-> Exchanges)
+	WSExchangesPath string `yaml:"ws_exchanges_path"`
 	// AuditPath - путь к audit.log
 	AuditPath string `yaml:"audit_path"`
 	// MaxFileSizeMB - максимальный размер одного лог файла в мегабайтах
@@ -118,10 +118,14 @@ type LogConfig struct {
 	Compress bool `yaml:"compress"`
 	// OutRequestToStdout - дублировать out_request.log в stdout
 	OutRequestToStdout bool `yaml:"out_request_to_stdout"`
-	// WSInToStdout - дублировать ws_in.log в stdout
-	WSInToStdout bool `yaml:"ws_in_to_stdout"`
-	// WSOutToStdout - дублировать ws_out.log в stdout
-	WSOutToStdout bool `yaml:"ws_out_to_stdout"`
+	// WSCoreToStdout - дублировать ws_core.log в stdout
+	WSCoreToStdout bool `yaml:"ws_core_to_stdout"`
+	// WSExchangesToStdout - дублировать ws_exchanges.log в stdout
+	WSExchangesToStdout bool `yaml:"ws_exchanges_to_stdout"`
+	// WSExchangesLogEnable - включить логирование WS потоков бирж в агрегатор ws_exchanges.log
+	WSExchangesLogEnable bool `yaml:"ws_exchanges_log_enable"`
+	// WSExchangeSingleLogEnable - включить отдельные WS логи по каждой бирже (ws-<exchange>.log)
+	WSExchangeSingleLogEnable bool `yaml:"ws_exchange_single_log_enable"`
 	// AuditToStdout - дублировать audit.log в stdout
 	AuditToStdout bool `yaml:"audit_to_stdout"`
 }
@@ -249,6 +253,9 @@ func Load(path string) (*Config, error) {
 	if hasLegacyTradeSection(data) {
 		return nil, fmt.Errorf("trade section is no longer supported; remove trade.update_interval from config")
 	}
+	if hasLegacyWSLoggingKeys(data) {
+		return nil, fmt.Errorf("logging ws_in/ws_out keys are no longer supported; use ws_core_path/ws_exchanges_path and ws_core_to_stdout/ws_exchanges_to_stdout")
+	}
 
 	c := defaultConfig()
 	if err := yaml.Unmarshal(data, c); err != nil {
@@ -317,9 +324,42 @@ func hasLegacyTradeSection(data []byte) bool {
 	return exists
 }
 
+func hasLegacyWSLoggingKeys(data []byte) bool {
+	var raw map[string]interface{}
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		return false
+	}
+
+	logging := asStringMap(raw["logging"])
+	if logging == nil {
+		return false
+	}
+
+	legacyKeys := []string{"ws_in_path", "ws_out_path", "ws_in_to_stdout", "ws_out_to_stdout"}
+	for _, key := range legacyKeys {
+		if _, exists := logging[key]; exists {
+			return true
+		}
+	}
+
+	return false
+}
+
 func validateConfig(c *Config) error {
 	if raw, ok := os.LookupEnv("TRADER_CORE_CONNECTIONS_WS_TLS_SKIP_VERIFY"); ok && strings.TrimSpace(raw) != "" {
 		return fmt.Errorf("TRADER_CORE_CONNECTIONS_WS_TLS_SKIP_VERIFY is no longer supported")
+	}
+
+	legacyEnvToNew := map[string]string{
+		"TRADER_LOG_WS_IN_PATH":       "TRADER_LOG_WS_CORE_PATH",
+		"TRADER_LOG_WS_OUT_PATH":      "TRADER_LOG_WS_EXCHANGES_PATH",
+		"TRADER_LOG_WS_IN_TO_STDOUT":  "TRADER_LOG_WS_CORE_TO_STDOUT",
+		"TRADER_LOG_WS_OUT_TO_STDOUT": "TRADER_LOG_WS_EXCHANGES_TO_STDOUT",
+	}
+	for legacyKey, newKey := range legacyEnvToNew {
+		if raw, ok := os.LookupEnv(legacyKey); ok && strings.TrimSpace(raw) != "" {
+			return fmt.Errorf("%s is no longer supported; use %s", legacyKey, newKey)
+		}
 	}
 
 	if c.CoreConnections.WS.WriteTimeout <= 0 || c.CoreConnections.WS.WriteTimeout > 24*time.Hour {
@@ -351,22 +391,24 @@ func validateConfig(c *Config) error {
 func defaultConfig() *Config {
 	return &Config{
 		Logging: LogConfig{
-			Level:              "info",
-			Format:             "json",
-			Dir:                "/var/log/trader",
-			ErrorPath:          "/var/log/trader/error.log",
-			OutRequestPath:     "/var/log/trader/out_request.log",
-			WSInPath:           "/var/log/trader/ws_in.log",
-			WSOutPath:          "/var/log/trader/ws_out.log",
-			AuditPath:          "/var/log/trader/audit.log",
-			MaxFileSizeMB:      10,
-			MaxBackups:         10,
-			MaxAgeDays:         30,
-			Compress:           false,
-			OutRequestToStdout: true,
-			WSInToStdout:       true,
-			WSOutToStdout:      true,
-			AuditToStdout:      true,
+			Level:                     "info",
+			Format:                    "json",
+			Dir:                       "/var/log/trader",
+			ErrorPath:                 "/var/log/trader/error.log",
+			OutRequestPath:            "/var/log/trader/out_request.log",
+			WSCorePath:                "/var/log/trader/ws_core.log",
+			WSExchangesPath:           "/var/log/trader/ws_exchanges.log",
+			AuditPath:                 "/var/log/trader/audit.log",
+			MaxFileSizeMB:             10,
+			MaxBackups:                10,
+			MaxAgeDays:                30,
+			Compress:                  false,
+			OutRequestToStdout:        true,
+			WSCoreToStdout:            true,
+			WSExchangesToStdout:       true,
+			WSExchangesLogEnable:      true,
+			WSExchangeSingleLogEnable: true,
+			AuditToStdout:             true,
 		},
 		OrderBook: OrderBookConfig{
 			DebugLogRaw: false,
@@ -448,11 +490,11 @@ func applyDefaults(c *Config) {
 	if c.Logging.OutRequestPath == "" {
 		c.Logging.OutRequestPath = filepath.Join(c.Logging.Dir, "out_request.log")
 	}
-	if c.Logging.WSInPath == "" {
-		c.Logging.WSInPath = filepath.Join(c.Logging.Dir, "ws_in.log")
+	if c.Logging.WSCorePath == "" {
+		c.Logging.WSCorePath = filepath.Join(c.Logging.Dir, "ws_core.log")
 	}
-	if c.Logging.WSOutPath == "" {
-		c.Logging.WSOutPath = filepath.Join(c.Logging.Dir, "ws_out.log")
+	if c.Logging.WSExchangesPath == "" {
+		c.Logging.WSExchangesPath = filepath.Join(c.Logging.Dir, "ws_exchanges.log")
 	}
 	if c.Logging.AuditPath == "" {
 		c.Logging.AuditPath = filepath.Join(c.Logging.Dir, "audit.log")
@@ -567,16 +609,18 @@ func applyEnvOverrides(c *Config) {
 	c.Logging.Dir = envString("TRADER_LOG_DIR", c.Logging.Dir)
 	c.Logging.ErrorPath = envString("TRADER_LOG_ERROR_PATH", c.Logging.ErrorPath)
 	c.Logging.OutRequestPath = envString("TRADER_LOG_OUT_REQUEST_PATH", c.Logging.OutRequestPath)
-	c.Logging.WSInPath = envString("TRADER_LOG_WS_IN_PATH", c.Logging.WSInPath)
-	c.Logging.WSOutPath = envString("TRADER_LOG_WS_OUT_PATH", c.Logging.WSOutPath)
+	c.Logging.WSCorePath = envString("TRADER_LOG_WS_CORE_PATH", c.Logging.WSCorePath)
+	c.Logging.WSExchangesPath = envString("TRADER_LOG_WS_EXCHANGES_PATH", c.Logging.WSExchangesPath)
 	c.Logging.AuditPath = envString("TRADER_LOG_AUDIT_PATH", c.Logging.AuditPath)
 	c.Logging.MaxFileSizeMB = envInt("TRADER_LOG_MAX_SIZE_MB", c.Logging.MaxFileSizeMB)
 	c.Logging.MaxBackups = envInt("TRADER_LOG_MAX_BACKUPS", c.Logging.MaxBackups)
 	c.Logging.MaxAgeDays = envInt("TRADER_LOG_MAX_AGE_DAYS", c.Logging.MaxAgeDays)
 	c.Logging.Compress = envBool("TRADER_LOG_COMPRESS", c.Logging.Compress)
 	c.Logging.OutRequestToStdout = envBool("TRADER_LOG_OUT_REQUEST_TO_STDOUT", c.Logging.OutRequestToStdout)
-	c.Logging.WSInToStdout = envBool("TRADER_LOG_WS_IN_TO_STDOUT", c.Logging.WSInToStdout)
-	c.Logging.WSOutToStdout = envBool("TRADER_LOG_WS_OUT_TO_STDOUT", c.Logging.WSOutToStdout)
+	c.Logging.WSCoreToStdout = envBool("TRADER_LOG_WS_CORE_TO_STDOUT", c.Logging.WSCoreToStdout)
+	c.Logging.WSExchangesToStdout = envBool("TRADER_LOG_WS_EXCHANGES_TO_STDOUT", c.Logging.WSExchangesToStdout)
+	c.Logging.WSExchangesLogEnable = envBool("TRADER_LOG_WS_EXCHANGES_LOG_ENABLE", c.Logging.WSExchangesLogEnable)
+	c.Logging.WSExchangeSingleLogEnable = envBool("TRADER_LOG_WS_EXCHANGE_SINGLE_LOG_ENABLE", c.Logging.WSExchangeSingleLogEnable)
 	c.Logging.AuditToStdout = envBool("TRADER_LOG_AUDIT_TO_STDOUT", c.Logging.AuditToStdout)
 
 	c.OrderBook.DebugLogRaw = envBool("TRADER_ORDERBOOK_DEBUG_LOG_RAW", c.OrderBook.DebugLogRaw)

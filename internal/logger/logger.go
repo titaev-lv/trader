@@ -14,24 +14,40 @@ import (
 )
 
 var (
-	Log           *slog.Logger
-	OutRequestLog *slog.Logger
-	WSInLog       *slog.Logger
-	WSOutLog      *slog.Logger
-	AuditLog      *slog.Logger
-	Trade         *slog.Logger
-	logLevel      slog.Level
-	logDir        string
-	logFiles      map[string]io.WriteCloser
-	fileMutex     sync.RWMutex
+	Log            *slog.Logger
+	OutRequestLog  *slog.Logger
+	WSCoreLog      *slog.Logger
+	WSExchangesLog *slog.Logger
+	AuditLog       *slog.Logger
+	Trade          *slog.Logger
+	logLevel       slog.Level
+	logDir         string
+	logFiles       map[string]io.WriteCloser
+	fileMutex      sync.RWMutex
+
+	wsExchangeLogs          map[string]*slog.Logger
+	wsExchangeDir           string
+	wsExchangeFormat        string
+	wsExchangeMaxSizeMB     int
+	wsExchangeMaxBackups    int
+	wsExchangeMaxAgeDays    int
+	wsExchangeCompress      bool
+	wsExchangeToStdout      bool
+	wsExchangesEnabled      bool
+	wsExchangeSingleEnabled bool
 )
 
 func init() {
 	logFiles = make(map[string]io.WriteCloser)
+	wsExchangeLogs = make(map[string]*slog.Logger)
 }
 
-func Init(levelStr, format string, maxFileSizeMB int, maxBackups int, maxAgeDays int, compress bool, errorLogPath, outRequestLogPath, wsInLogPath, wsOutLogPath, auditLogPath string, outRequestToStdout, wsInToStdout, wsOutToStdout, auditToStdout bool) error {
-	if err := validateLogPaths(errorLogPath, outRequestLogPath, wsInLogPath, wsOutLogPath, auditLogPath); err != nil {
+func Init(levelStr, format string, maxFileSizeMB int, maxBackups int, maxAgeDays int, compress bool, errorLogPath, outRequestLogPath, wsCoreLogPath, wsExchangesLogPath, auditLogPath string, outRequestToStdout, wsCoreToStdout, wsExchangesToStdout, wsExchangesLogEnable, wsExchangeSingleLogEnable, auditToStdout bool) error {
+	paths := []string{errorLogPath, outRequestLogPath, wsCoreLogPath, auditLogPath}
+	if wsExchangesLogEnable || wsExchangeSingleLogEnable {
+		paths = append(paths, wsExchangesLogPath)
+	}
+	if err := validateLogPaths(paths...); err != nil {
 		return err
 	}
 	if format == "" {
@@ -62,6 +78,14 @@ func Init(levelStr, format string, maxFileSizeMB int, maxBackups int, maxAgeDays
 		logLevel = slog.LevelInfo
 	}
 
+	fileMutex.Lock()
+	for name, f := range logFiles {
+		_ = f.Close()
+		delete(logFiles, name)
+	}
+	wsExchangeLogs = make(map[string]*slog.Logger)
+	fileMutex.Unlock()
+
 	if err := ensureLogFileExists(errorLogPath); err != nil {
 		return err
 	}
@@ -80,23 +104,26 @@ func Init(levelStr, format string, maxFileSizeMB int, maxBackups int, maxAgeDays
 	}
 	logFiles["out_request"] = outRequestLogFile
 
-	if err := ensureLogFileExists(wsInLogPath); err != nil {
+	if err := ensureLogFileExists(wsCoreLogPath); err != nil {
 		return err
 	}
-	wsInLogFile, err := newRotatingLogFile(wsInLogPath, maxFileSizeMB, maxBackups, maxAgeDays, compress)
+	wsCoreLogFile, err := newRotatingLogFile(wsCoreLogPath, maxFileSizeMB, maxBackups, maxAgeDays, compress)
 	if err != nil {
 		return err
 	}
-	logFiles["ws_in"] = wsInLogFile
+	logFiles["ws_core"] = wsCoreLogFile
 
-	if err := ensureLogFileExists(wsOutLogPath); err != nil {
-		return err
+	var wsExchangesLogFile *lumberjack.Logger
+	if wsExchangesLogEnable {
+		if err := ensureLogFileExists(wsExchangesLogPath); err != nil {
+			return err
+		}
+		wsExchangesLogFile, err = newRotatingLogFile(wsExchangesLogPath, maxFileSizeMB, maxBackups, maxAgeDays, compress)
+		if err != nil {
+			return err
+		}
+		logFiles["ws_exchanges"] = wsExchangesLogFile
 	}
-	wsOutLogFile, err := newRotatingLogFile(wsOutLogPath, maxFileSizeMB, maxBackups, maxAgeDays, compress)
-	if err != nil {
-		return err
-	}
-	logFiles["ws_out"] = wsOutLogFile
 
 	if err := ensureLogFileExists(auditLogPath); err != nil {
 		return err
@@ -106,6 +133,16 @@ func Init(levelStr, format string, maxFileSizeMB int, maxBackups int, maxAgeDays
 		return err
 	}
 	logFiles["audit"] = auditLogFile
+
+	wsExchangeDir = filepath.Dir(wsExchangesLogPath)
+	wsExchangeFormat = format
+	wsExchangeMaxSizeMB = maxFileSizeMB
+	wsExchangeMaxBackups = maxBackups
+	wsExchangeMaxAgeDays = maxAgeDays
+	wsExchangeCompress = compress
+	wsExchangeToStdout = wsExchangesToStdout
+	wsExchangesEnabled = wsExchangesLogEnable
+	wsExchangeSingleEnabled = wsExchangeSingleLogEnable
 
 	opts := &slog.HandlerOptions{
 		Level:       logLevel,
@@ -121,13 +158,16 @@ func Init(levelStr, format string, maxFileSizeMB int, maxBackups int, maxAgeDays
 	if outRequestToStdout {
 		outRequestWriter = io.MultiWriter(os.Stdout, outRequestLogFile)
 	}
-	wsInWriter := io.Writer(wsInLogFile)
-	if wsInToStdout {
-		wsInWriter = io.MultiWriter(os.Stdout, wsInLogFile)
+	wsCoreWriter := io.Writer(wsCoreLogFile)
+	if wsCoreToStdout {
+		wsCoreWriter = io.MultiWriter(os.Stdout, wsCoreLogFile)
 	}
-	wsOutWriter := io.Writer(wsOutLogFile)
-	if wsOutToStdout {
-		wsOutWriter = io.MultiWriter(os.Stdout, wsOutLogFile)
+	wsExchangesWriter := io.Writer(io.Discard)
+	if wsExchangesLogEnable {
+		wsExchangesWriter = io.Writer(wsExchangesLogFile)
+	}
+	if wsExchangesLogEnable && wsExchangesToStdout {
+		wsExchangesWriter = io.MultiWriter(os.Stdout, wsExchangesLogFile)
 	}
 	auditWriter := io.Writer(auditLogFile)
 	if auditToStdout {
@@ -136,8 +176,8 @@ func Init(levelStr, format string, maxFileSizeMB int, maxBackups int, maxAgeDays
 
 	Log = slog.New(newHandler(format, errorWriter, opts))
 	OutRequestLog = slog.New(newHandler(format, outRequestWriter, opts))
-	WSInLog = slog.New(newHandler(format, wsInWriter, opts))
-	WSOutLog = slog.New(newHandler(format, wsOutWriter, opts))
+	WSCoreLog = slog.New(newHandler(format, wsCoreWriter, opts))
+	WSExchangesLog = slog.New(newHandler(format, wsExchangesWriter, opts))
 	AuditLog = slog.New(newHandler(format, auditWriter, auditOpts))
 	Trade = Log
 	slog.SetDefault(Log)
@@ -169,20 +209,83 @@ func GetOutRequest(module string) *slog.Logger {
 	return OutRequestLog.With("module", module)
 }
 
-func GetWSIn(module string) *slog.Logger {
-	if WSInLog == nil {
+func GetWSCore(module string) *slog.Logger {
+	if WSCoreLog == nil {
 		return Get(module)
 	}
-	return WSInLog.With("module", module)
+	return WSCoreLog.With("module", module)
 }
 
-func GetWSOut(module string) *slog.Logger {
-	if WSOutLog == nil {
+func GetWSExchanges(module string) *slog.Logger {
+	if WSExchangesLog == nil {
 		return Get(module)
 	}
-	return WSOutLog.With("module", module)
+	return WSExchangesLog.With("module", module)
 }
 
+func GetWSExchange(exchangeID, module string) *slog.Logger {
+	normalized := normalizeExchangeID(exchangeID)
+	if normalized == "" {
+		return GetWSExchanges(module)
+	}
+	if !wsExchangeSingleEnabled {
+		return GetWSExchanges(module).With("exchange_id", normalized)
+	}
+	if module == "" {
+		module = "ws_exchange"
+	}
+
+	fileMutex.RLock()
+	existing := wsExchangeLogs[normalized]
+	fileMutex.RUnlock()
+	if existing != nil {
+		return existing.With("module", module, "exchange_id", normalized)
+	}
+
+	fileMutex.Lock()
+	defer fileMutex.Unlock()
+
+	existing = wsExchangeLogs[normalized]
+	if existing != nil {
+		return existing.With("module", module, "exchange_id", normalized)
+	}
+
+	if wsExchangeDir == "" {
+		if logDir == "" {
+			return GetWSExchanges(module).With("exchange_id", normalized)
+		}
+		wsExchangeDir = logDir
+	}
+
+	path := filepath.Join(wsExchangeDir, fmt.Sprintf("ws-%s.log", normalized))
+	if err := ensureLogFileExists(path); err != nil {
+		if Log != nil {
+			Log.Warn("failed to create exchange ws log file, fallback to ws_exchanges", "exchange_id", normalized, "path", path, "error", err)
+		}
+		return GetWSExchanges(module).With("exchange_id", normalized)
+	}
+
+	rotator, err := newRotatingLogFile(path, wsExchangeMaxSizeMB, wsExchangeMaxBackups, wsExchangeMaxAgeDays, wsExchangeCompress)
+	if err != nil {
+		if Log != nil {
+			Log.Warn("failed to init exchange ws logger, fallback to ws_exchanges", "exchange_id", normalized, "path", path, "error", err)
+		}
+		return GetWSExchanges(module).With("exchange_id", normalized)
+	}
+
+	writer := io.Writer(rotator)
+	if wsExchangeToStdout {
+		writer = io.MultiWriter(os.Stdout, rotator)
+	}
+
+	base := slog.New(newHandler(wsExchangeFormat, writer, &slog.HandlerOptions{Level: logLevel, ReplaceAttr: replaceTimeAttr}))
+	wsExchangeLogs[normalized] = base
+	logFiles["ws_exchange:"+normalized] = rotator
+
+	return base.With("module", module, "exchange_id", normalized)
+}
+
+// GetAudit возвращает аудит-логгер.
 func GetAudit(module string) *slog.Logger {
 	if AuditLog == nil {
 		return Get(module)
@@ -269,13 +372,13 @@ func Close() error {
 	defer fileMutex.Unlock()
 
 	var lastErr error
-	// Закрываем все открытые файлы логов
 	for name, f := range logFiles {
 		if err := f.Close(); err != nil {
 			lastErr = err
 		}
 		delete(logFiles, name)
 	}
+	wsExchangeLogs = make(map[string]*slog.Logger)
 	return lastErr
 }
 
@@ -392,4 +495,33 @@ func shouldRotateOnStartup(path string) bool {
 		return false
 	}
 	return info.Size() > 0
+}
+
+func normalizeExchangeID(exchangeID string) string {
+	trimmed := strings.ToLower(strings.TrimSpace(exchangeID))
+	if trimmed == "" {
+		return ""
+	}
+
+	var b strings.Builder
+	b.Grow(len(trimmed))
+	for i := 0; i < len(trimmed); i++ {
+		ch := trimmed[i]
+		if (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '-' || ch == '_' {
+			b.WriteByte(ch)
+			continue
+		}
+		b.WriteByte('-')
+	}
+
+	normalized := strings.Trim(b.String(), "-_")
+	if normalized == "" {
+		return ""
+	}
+
+	for strings.Contains(normalized, "--") {
+		normalized = strings.ReplaceAll(normalized, "--", "-")
+	}
+
+	return normalized
 }

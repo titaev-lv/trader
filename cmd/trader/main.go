@@ -62,12 +62,14 @@ func main() {
 		cfg.Logging.Compress,
 		cfg.Logging.ErrorPath,
 		cfg.Logging.OutRequestPath,
-		cfg.Logging.WSInPath,
-		cfg.Logging.WSOutPath,
+		cfg.Logging.WSCorePath,
+		cfg.Logging.WSExchangesPath,
 		cfg.Logging.AuditPath,
 		cfg.Logging.OutRequestToStdout,
-		cfg.Logging.WSInToStdout,
-		cfg.Logging.WSOutToStdout,
+		cfg.Logging.WSCoreToStdout,
+		cfg.Logging.WSExchangesToStdout,
+		cfg.Logging.WSExchangesLogEnable,
+		cfg.Logging.WSExchangeSingleLogEnable,
 		cfg.Logging.AuditToStdout,
 	); err != nil {
 		fmt.Printf("Failed to init logger: %+v\n", err)

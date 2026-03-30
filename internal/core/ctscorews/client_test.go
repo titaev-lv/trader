@@ -177,7 +177,7 @@ func TestPingStatsRTT(t *testing.T) {
 	c.lastPingAt = time.Now().Add(-5 * time.Millisecond)
 	c.pingMu.Unlock()
 
-	c.touchPong()
+	c.touchPong("")
 
 	stats := c.PingStats()
 	if stats.LastRTT <= 0 {

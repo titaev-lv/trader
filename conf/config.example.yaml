@@ -69,13 +69,15 @@ logging:
   compress: false
   error_path: "/var/log/trader/error.log"
   out_request_path: "/var/log/trader/out_request.log"
-  ws_in_path: "/var/log/trader/ws_in.log"
-  ws_out_path: "/var/log/trader/ws_out.log"
+  ws_core_path: "/var/log/trader/ws_core.log"
+  ws_exchanges_path: "/var/log/trader/ws_exchanges.log"
   audit_path: "/var/log/trader/audit.log"
   max_size_mb: 100
   max_backups: 10
   max_age_days: 30
   out_request_to_stdout: true
-  ws_in_to_stdout: true
-  ws_out_to_stdout: true
+  ws_core_to_stdout: true
+  ws_exchanges_to_stdout: true
+  ws_exchanges_log_enable: true
+  ws_exchange_single_log_enable: true
   audit_to_stdout: true

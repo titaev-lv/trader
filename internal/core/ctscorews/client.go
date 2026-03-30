@@ -26,10 +26,12 @@ import (
 type HandlerFunc func(raw []byte) error
 
 type Client struct {
-	cfg     config.CoreWSConfig
-	handler HandlerFunc
-	log     *slog.Logger
-	backoff *reconnectBackoff
+	cfg      config.CoreWSConfig
+	handler  HandlerFunc
+	log      *slog.Logger
+	wsInLog  *slog.Logger
+	wsOutLog *slog.Logger
+	backoff  *reconnectBackoff
 
 	pingMu     sync.Mutex
 	lastPingAt time.Time
@@ -149,10 +151,13 @@ type envelope struct {
 }
 
 func New(cfg config.CoreWSConfig, handler HandlerFunc) *Client {
+	coreLog := logger.GetWSCore("ctscorews")
 	return &Client{
 		cfg:               cfg,
 		handler:           handler,
 		log:               logger.Get("ctscorews"),
+		wsInLog:           coreLog,
+		wsOutLog:          coreLog,
 		reconnectByReason: map[string]uint64{},
 		backoff:           newReconnectBackoff(cfg, nil),
 	}
@@ -240,7 +245,7 @@ func (c *Client) runSession(ctx context.Context) error {
 
 		env, ok := decodeEnvelope(raw)
 		if ok {
-			c.log.Debug("ws in", "action", env.Action, "seq", env.Seq, "ack", env.Ack)
+			c.wsInLog.Debug(string(raw), "direction", "in", "action", env.Action, "seq", env.Seq, "ack", env.Ack)
 			shouldProcess, gapErr := c.observeInboundEnvelope(*env)
 			if gapErr != nil {
 				c.log.Warn("cts-core ws sequence gap detected, reconnecting", "error", gapErr)
@@ -258,6 +263,8 @@ func (c *Client) runSession(ctx context.Context) error {
 			}
 		} else if !isTaskEnvelope(raw) {
 			continue
+		} else {
+			c.wsInLog.Debug(string(raw), "direction", "in")
 		}
 
 		if c.handler == nil {
@@ -351,7 +358,7 @@ func (c *Client) writeJSON(conn *websocket.Conn, payload map[string]any) error {
 	}
 
 	if action, _ := payload["action"].(string); action != "" {
-		c.log.Debug("ws out", "action", action, "seq", payload["seq"], "ack", payload["ack"])
+		c.wsOutLog.Debug(string(raw), "direction", "out", "action", action, "seq", payload["seq"], "ack", payload["ack"])
 	}
 	return nil
 }
@@ -622,7 +629,7 @@ func buildTLSConfig(cfg config.CoreWSConfig) (*tls.Config, error) {
 func (c *Client) prepareConn(conn *websocket.Conn) {
 	_ = conn.SetReadDeadline(time.Now().Add(defaultPongTimeout))
 	conn.SetPongHandler(func(appData string) error {
-		c.touchPong()
+		c.touchPong(appData)
 		return conn.SetReadDeadline(time.Now().Add(defaultPongTimeout))
 	})
 }
@@ -662,18 +669,45 @@ func (c *Client) sendPing(conn *websocket.Conn) error {
 		return err
 	}
 
-	c.log.Debug("ws ping sent", "seq", seq, "ack", ack)
+	c.wsOutLog.Debug(controlFrameMsg("ping", seq, ack), "direction", "out", "frame", "ping", "seq", seq, "ack", ack)
 	return nil
 }
 
-func (c *Client) touchPong() {
+func (c *Client) touchPong(appData string) {
 	c.pingMu.Lock()
 	if !c.lastPingAt.IsZero() {
 		c.lastRTT = time.Since(c.lastPingAt)
 	}
 	c.lastPongAt = time.Now()
 	c.pingMu.Unlock()
-	c.log.Debug("ws pong received")
+
+	raw := []byte(appData)
+	if len(raw) >= 16 {
+		seq := binary.BigEndian.Uint64(raw[0:8])
+		ack := binary.BigEndian.Uint64(raw[8:16])
+		c.wsInLog.Debug(controlFrameMsg("pong", seq, ack), "direction", "in", "frame", "pong", "seq", seq, "ack", ack)
+		return
+	}
+
+	c.wsInLog.Debug(controlFrameMsg("pong", 0, 0), "direction", "in", "frame", "pong")
+}
+
+func controlFrameMsg(frame string, seq uint64, ack uint64) string {
+	payload := map[string]any{
+		"type":  "control",
+		"frame": frame,
+	}
+	if seq > 0 {
+		payload["seq"] = seq
+	}
+	if ack > 0 {
+		payload["ack"] = ack
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Sprintf("{\"type\":\"control\",\"frame\":\"%s\"}", frame)
+	}
+	return string(raw)
 }
 
 func (c *Client) PingStats() PingStats {

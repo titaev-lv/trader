@@ -28,17 +28,16 @@ type Pool struct {
 	mu               sync.RWMutex
 	eventToRequestID map[string]correlationEntry
 	outReqLog        *slog.Logger
-	wsInLog          *slog.Logger
-	wsOutLog         *slog.Logger
+	wsExchangesLog   *slog.Logger
 }
 
-// NewPool создает новый WS pool с логгерами ws_in/ws_out
+// NewPool создает новый WS pool с единым логгером канала бирж ws_exchanges
 func NewPool() *Pool {
+	exchangeLog := logger.GetWSExchanges("ws_exchanges")
 	pool := &Pool{
 		eventToRequestID: make(map[string]correlationEntry),
 		outReqLog:        logger.GetOutRequest("ws"),
-		wsInLog:          logger.GetWSIn("ws_in"),
-		wsOutLog:         logger.GetWSOut("ws_out"),
+		wsExchangesLog:   exchangeLog,
 	}
 
 	go pool.correlationCleanupLoop()
@@ -51,7 +50,7 @@ func (p *Pool) Subscribe(exchangeID, marketType string, pairs []string, depth in
 	return err
 }
 
-// SubscribeWithRequestID подписывает на пары и прокидывает request_id в ws_out
+// SubscribeWithRequestID подписывает на пары и прокидывает request_id в ws_exchanges
 // Возвращает event_id для корреляции входящих WS событий.
 func (p *Pool) SubscribeWithRequestID(exchangeID, marketType string, pairs []string, depth int, requestID string) (string, error) {
 	start := time.Now()
@@ -65,10 +64,9 @@ func (p *Pool) SubscribeWithRequestID(exchangeID, marketType string, pairs []str
 	eventID := newEventID("ws-sub")
 	p.rememberCorrelation(eventID, requestID)
 	latencyMS := float64(time.Since(start).Microseconds()) / 1000.0
-	latencyField := p.buildWSLatencyField(p.wsOutLog, latencyMS, nil)
+	latencyField := p.buildWSLatencyField(p.wsExchangesLog, latencyMS, nil)
 
-	p.wsOutLog.Info(
-		"ws subscribe",
+	p.logExchangeEvent(exchangeID, "ws subscribe",
 		"event_id", eventID,
 		"request_id", requestID,
 		"exchange_id", exchangeID,
@@ -88,7 +86,7 @@ func (p *Pool) Unsubscribe(exchangeID, marketType string, pairs []string) error 
 	return err
 }
 
-// UnsubscribeWithRequestID отписывает пары и прокидывает request_id в ws_out
+// UnsubscribeWithRequestID отписывает пары и прокидывает request_id в ws_exchanges
 // Возвращает event_id для корреляции входящих WS событий.
 func (p *Pool) UnsubscribeWithRequestID(exchangeID, marketType string, pairs []string, requestID string) (string, error) {
 	start := time.Now()
@@ -102,10 +100,9 @@ func (p *Pool) UnsubscribeWithRequestID(exchangeID, marketType string, pairs []s
 	eventID := newEventID("ws-unsub")
 	p.rememberCorrelation(eventID, requestID)
 	latencyMS := float64(time.Since(start).Microseconds()) / 1000.0
-	latencyField := p.buildWSLatencyField(p.wsOutLog, latencyMS, nil)
+	latencyField := p.buildWSLatencyField(p.wsExchangesLog, latencyMS, nil)
 
-	p.wsOutLog.Info(
-		"ws unsubscribe",
+	p.logExchangeEvent(exchangeID, "ws unsubscribe",
 		"event_id", eventID,
 		"request_id", requestID,
 		"exchange_id", exchangeID,
@@ -149,7 +146,7 @@ func (p *Pool) logOutRequest(method, path, url string, status int, latency time.
 	p.outReqLog.Info("WS request", fields...)
 }
 
-// LogInboundMessage логирует входящее WS событие в ws_in.
+// LogInboundMessage логирует входящее WS событие в ws_exchanges.
 // Если request_id пустой, пытается восстановить его по event_id.
 func (p *Pool) LogInboundMessage(exchangeID, marketType, messageType, eventID, requestID string, payloadSize int, status string) {
 	inboundStart := time.Now()
@@ -163,10 +160,9 @@ func (p *Pool) LogInboundMessage(exchangeID, marketType, messageType, eventID, r
 	}
 
 	inboundLatencyMS := float64(time.Since(inboundStart).Microseconds()) / 1000.0
-	latencyField := p.buildWSLatencyField(p.wsInLog, inboundLatencyMS, latencyBreakdown)
+	latencyField := p.buildWSLatencyField(p.wsExchangesLog, inboundLatencyMS, latencyBreakdown)
 
-	p.wsInLog.Info(
-		"ws inbound",
+	p.logExchangeEvent(exchangeID, "ws inbound",
 		"event_id", eventID,
 		"request_id", requestID,
 		"exchange_id", exchangeID,
@@ -176,6 +172,21 @@ func (p *Pool) LogInboundMessage(exchangeID, marketType, messageType, eventID, r
 		"status", status,
 		"latency_ms", latencyField,
 	)
+}
+
+func (p *Pool) logExchangeEvent(exchangeID string, msg string, fields ...any) {
+	if p.wsExchangesLog != nil {
+		p.wsExchangesLog.Info(msg, fields...)
+	}
+
+	if strings.TrimSpace(exchangeID) == "" {
+		return
+	}
+
+	exchangeLog := logger.GetWSExchange(exchangeID, "ws_exchange")
+	if exchangeLog != nil {
+		exchangeLog.Info(msg, fields...)
+	}
 }
 
 func (p *Pool) rememberCorrelation(eventID, requestID string) {
