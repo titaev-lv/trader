@@ -310,7 +310,7 @@ func (m *Manager) Status() map[string]interface{} {
 	m.mu.RUnlock()
 
 	m.snapMu.RLock()
-	snapshot := m.snapshot
+	snapshot := cloneRuntimeSnapshot(m.snapshot)
 	m.snapMu.RUnlock()
 
 	uptime := time.Duration(0)
@@ -356,14 +356,41 @@ func (m *Manager) Status() map[string]interface{} {
 		"runtime": map[string]interface{}{
 			"iteration":        snapshot.Iteration,
 			"last_trigger":     snapshot.LastTrigger,
-			"last_sync_at":     snapshot.LastSyncAt,
-			"last_diff_at":     snapshot.LastDiffAt,
-			"last_apply_at":    snapshot.LastApplyAt,
-			"last_success_at":  snapshot.LastSuccessAt,
+			"last_sync_at":     timeValueOrNil(snapshot.LastSyncAt),
+			"last_diff_at":     timeValueOrNil(snapshot.LastDiffAt),
+			"last_apply_at":    timeValueOrNil(snapshot.LastApplyAt),
+			"last_success_at":  timeValueOrNil(snapshot.LastSuccessAt),
 			"last_error":       snapshot.LastError,
 			"last_error_stage": snapshot.LastErrorStage,
 			"to_subscribe":     snapshot.LastSubscribe,
 			"to_unsubscribe":   snapshot.LastUnsubscribe,
+			"core_ws_reconnect": func() interface{} {
+				if m.coreWSClient == nil {
+					return nil
+				}
+				metrics := m.coreWSClient.ReconnectMetrics()
+				return map[string]interface{}{
+					"total":              metrics.Total,
+					"by_reason":          metrics.ByReason,
+					"close_4009_seq_gap": metrics.Close4009SeqGap,
+				}
+			}(),
+			"core_ws_ping": func() interface{} {
+				if m.coreWSClient == nil {
+					return nil
+				}
+				stats := m.coreWSClient.PingStats()
+				return map[string]interface{}{
+					"last_ping_at": stats.LastPingAt,
+					"last_pong_at": stats.LastPongAt,
+					"last_rtt_ms": func() interface{} {
+						if stats.LastRTT == 0 {
+							return nil
+						}
+						return float64(stats.LastRTT) / float64(time.Millisecond)
+					}(),
+				}
+			}(),
 		},
 	}
 }
@@ -383,7 +410,31 @@ func (m *Manager) GetContext() context.Context {
 func (m *Manager) RuntimeSnapshot() RuntimeSnapshot {
 	m.snapMu.RLock()
 	defer m.snapMu.RUnlock()
-	return m.snapshot
+	return cloneRuntimeSnapshot(m.snapshot)
+}
+
+func cloneRuntimeSnapshot(src RuntimeSnapshot) RuntimeSnapshot {
+	out := src
+	out.LastSyncAt = cloneTimePtr(src.LastSyncAt)
+	out.LastDiffAt = cloneTimePtr(src.LastDiffAt)
+	out.LastApplyAt = cloneTimePtr(src.LastApplyAt)
+	out.LastSuccessAt = cloneTimePtr(src.LastSuccessAt)
+	return out
+}
+
+func cloneTimePtr(src *time.Time) *time.Time {
+	if src == nil {
+		return nil
+	}
+	v := *src
+	return &v
+}
+
+func timeValueOrNil(src *time.Time) interface{} {
+	if src == nil {
+		return nil
+	}
+	return *src
 }
 
 func (m *Manager) UpdateTasks(data *task.TasksData) error {

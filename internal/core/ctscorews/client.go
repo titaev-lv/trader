@@ -2,9 +2,16 @@ package ctscorews
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand"
+	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -21,17 +28,129 @@ type Client struct {
 	cfg     config.CoreWSConfig
 	handler HandlerFunc
 	log     *slog.Logger
+	backoff *reconnectBackoff
+
+	pingMu     sync.Mutex
+	lastPingAt time.Time
+	lastPongAt time.Time
+	lastRTT    time.Duration
 
 	writeMu   sync.Mutex
 	sessionMu sync.RWMutex
 	sessionID string
+
+	seqMu       sync.Mutex
+	inboundSeq  uint64
+	outboundSeq uint64
+	peerAck     uint64
+	pingSeq     uint64
+
+	metricsMu             sync.Mutex
+	reconnectTotal        uint64
+	reconnectByReason     map[string]uint64
+	reconnectSeqGapClose4 uint64
+}
+
+var errSequenceGap = errors.New("ctscore ws inbound sequence gap")
+
+const (
+	reconnectReasonClose4009             = "ws_close_4009_seq_gap"
+	reconnectErrorTotalThreshold  uint64 = 5
+	reconnectErrorReasonThreshold uint64 = 3
+
+	defaultPingInterval = 10 * time.Second
+	defaultPongTimeout  = 30 * time.Second
+	defaultWriteTimeout = 10 * time.Second
+)
+
+type reconnectBackoff struct {
+	min        time.Duration
+	max        time.Duration
+	current    time.Duration
+	resetAfter time.Duration
+	rand       *rand.Rand
+}
+
+func newReconnectBackoff(cfg config.CoreWSConfig, r *rand.Rand) *reconnectBackoff {
+	min := time.Duration(cfg.ReconnectDelaySec) * time.Second
+	if min <= 0 {
+		min = 1 * time.Second
+	}
+	max := 10 * time.Second
+	if min > max {
+		max = min
+	}
+	if r == nil {
+		r = rand.New(rand.NewSource(time.Now().UnixNano()))
+	}
+
+	return &reconnectBackoff{
+		min:        min,
+		max:        max,
+		resetAfter: 60 * time.Second,
+		rand:       r,
+	}
+}
+
+func (b *reconnectBackoff) next(uptime time.Duration) time.Duration {
+	if b == nil {
+		return 1 * time.Second
+	}
+
+	if uptime >= b.resetAfter {
+		b.current = b.min
+		return b.withJitter(b.current)
+	}
+
+	if b.current == 0 {
+		b.current = b.min
+	} else {
+		b.current *= 2
+		if b.current > b.max {
+			b.current = b.max
+		}
+	}
+
+	return b.withJitter(b.current)
+}
+
+func (b *reconnectBackoff) withJitter(d time.Duration) time.Duration {
+	if b == nil || b.rand == nil {
+		return d
+	}
+	jitterPct := 0.1 + b.rand.Float64()*0.1 // 10-20% jitter
+	jitter := time.Duration(float64(d) * jitterPct)
+	return d + jitter
+}
+
+type ReconnectMetrics struct {
+	Total           uint64            `json:"total"`
+	ByReason        map[string]uint64 `json:"by_reason"`
+	Close4009SeqGap uint64            `json:"close_4009_seq_gap"`
+}
+
+type PingStats struct {
+	LastPingAt time.Time     `json:"last_ping_at"`
+	LastPongAt time.Time     `json:"last_pong_at"`
+	LastRTT    time.Duration `json:"last_rtt"`
+}
+
+type envelope struct {
+	Type      string          `json:"type"`
+	Action    string          `json:"action"`
+	Seq       uint64          `json:"seq,omitempty"`
+	Ack       uint64          `json:"ack,omitempty"`
+	RequestID string          `json:"request_id,omitempty"`
+	Payload   json.RawMessage `json:"payload,omitempty"`
 }
 
 func New(cfg config.CoreWSConfig, handler HandlerFunc) *Client {
 	return &Client{
-		cfg:     cfg,
-		handler: handler,
-		log:     logger.Get("ctscorews"),
+		cfg:               cfg,
+		handler:           handler,
+		log:               logger.Get("ctscorews"),
+		reconnectByReason: map[string]uint64{},
+		backoff:           newReconnectBackoff(cfg, nil),
 	}
 }
 
@@ -46,31 +165,53 @@ func (c *Client) Run(ctx context.Context) {
 			return
 		}
 
+		sessionStart := time.Now()
 		if err := c.runSession(ctx); err != nil {
-			c.log.Warn("cts-core ws session finished", "error", err)
+			reason := classifyReconnectReason(err)
+			total, reasonCount, gap4009Count := c.incrementReconnectReason(reason)
+			c.logSessionFinished(err, reason, total, reasonCount, gap4009Count)
+
+			delay := reconnectDelay
+			if c.backoff != nil {
+				delay = c.backoff.next(time.Since(sessionStart))
+			}
+
+			if ctx.Err() != nil {
+				return
+			}
+
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(delay):
+			}
 		}
 
 		if ctx.Err() != nil {
 			return
 		}
-
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(reconnectDelay):
-		}
 	}
 }
 
 func (c *Client) runSession(ctx context.Context) error {
-	conn, _, err := websocket.DefaultDialer.DialContext(ctx, c.cfg.URL, nil)
+	dialer, err := c.buildDialer()
+	if err != nil {
+		return err
+	}
+
+	conn, _, err := dialer.DialContext(ctx, c.cfg.URL, nil)
 	if err != nil {
 		return fmt.Errorf("dial cts-core ws: %w", err)
 	}
-	defer conn.Close()
+	defer func() {
+		_ = c.closeConn(conn, websocket.CloseNormalClosure, "shutdown")
+		conn.Close()
+	}()
 
 	c.log.Info("cts-core ws connected", "url", c.cfg.URL)
 	c.setSessionID("")
+	c.resetSequenceState()
+	c.prepareConn(conn)
 
 	if err := c.sendRegister(conn); err != nil {
 		return err
@@ -79,6 +220,7 @@ func (c *Client) runSession(ctx context.Context) error {
 	hbCtx, hbCancel := context.WithCancel(ctx)
 	defer hbCancel()
 	go c.heartbeatLoop(hbCtx, conn)
+	go c.pingLoop(hbCtx, conn)
 
 	for {
 		if ctx.Err() != nil {
@@ -90,9 +232,21 @@ func (c *Client) runSession(ctx context.Context) error {
 			return fmt.Errorf("read ws message: %w", err)
 		}
 
-		c.captureSessionID(raw)
+		env, ok := decodeEnvelope(raw)
+		if ok {
+			c.log.Debug("ws in", "action", env.Action, "seq", env.Seq, "ack", env.Ack)
+			if gapErr := c.observeInboundEnvelope(*env); gapErr != nil {
+				c.log.Warn("cts-core ws sequence gap detected, reconnecting", "error", gapErr)
+				return gapErr
+			}
+			if env.Action == "trader.register_ack" {
+				c.captureSessionID(*env)
+			}
 
-		if !isTaskEnvelope(raw) {
+			if !strings.HasPrefix(env.Action, "task.") {
+				continue
+			}
+		} else if !isTaskEnvelope(raw) {
 			continue
 		}
 
@@ -103,7 +257,7 @@ func (c *Client) runSession(ctx context.Context) error {
 		if err := c.handler(raw); err != nil {
 			c.log.Warn("failed to apply task envelope", "error", err)
 		} else {
-			c.log.Info("task envelope applied", "source", "ctscorews")
+			c.log.Debug("task envelope applied", "source", "ctscorews")
 		}
 	}
 }
@@ -132,16 +286,20 @@ func (c *Client) heartbeatLoop(ctx context.Context, conn *websocket.Conn) {
 
 func (c *Client) sendRegister(conn *websocket.Conn) error {
 	payload := map[string]any{
-		"trader_id": c.cfg.TraderID,
-		"version":   c.cfg.Version,
-		"region":    c.cfg.Region,
+		"version": c.cfg.Version,
+		"region":  c.cfg.Region,
 	}
 
+	seq, ack := c.nextOutboundSeqAck()
 	env := map[string]any{
 		"type":       "request",
 		"action":     "trader.register",
+		"seq":        seq,
 		"request_id": fmt.Sprintf("reg-%d", time.Now().UTC().UnixNano()),
 		"payload":    payload,
+	}
+	if ack > 0 {
+		env["ack"] = ack
 	}
 
 	return c.writeJSON(conn, env)
@@ -149,17 +307,21 @@ func (c *Client) sendRegister(conn *websocket.Conn) error {
 
 func (c *Client) sendHeartbeat(conn *websocket.Conn) error {
 	payload := map[string]any{
-		"trader_id": c.cfg.TraderID,
-		"status":    "active",
+		"status": "active",
 	}
 	if sid := c.getSessionID(); sid != "" {
 		payload["session_id"] = sid
 	}
 
+	seq, ack := c.nextOutboundSeqAck()
 	env := map[string]any{
 		"type":    "event",
 		"action":  "trader.heartbeat",
+		"seq":     seq,
 		"payload": payload,
+	}
+	if ack > 0 {
+		env["ack"] = ack
 	}
 
 	return c.writeJSON(conn, env)
@@ -173,32 +335,33 @@ func (c *Client) writeJSON(conn *websocket.Conn, payload map[string]any) error {
 
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
+	_ = conn.SetWriteDeadline(time.Now().Add(c.wsWriteTimeout()))
 	if err := conn.WriteMessage(websocket.TextMessage, raw); err != nil {
 		return err
 	}
 
 	if action, _ := payload["action"].(string); action != "" {
-		c.log.Info("ws out", "action", action)
+		c.log.Debug("ws out", "action", action, "seq", payload["seq"], "ack", payload["ack"])
 	}
 	return nil
 }
 
-func (c *Client) captureSessionID(raw []byte) {
-	var msg struct {
-		Action  string `json:"action"`
-		Payload struct {
-			SessionID string `json:"session_id"`
-		} `json:"payload"`
+func (c *Client) captureSessionID(env envelope) {
+	if env.Action != "trader.register_ack" || len(env.Payload) == 0 {
+		return
 	}
 
-	if err := json.Unmarshal(raw, &msg); err != nil {
+	var payload struct {
+		SessionID string `json:"session_id"`
+	}
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
 		return
 	}
-	if msg.Action != "trader.register_ack" || msg.Payload.SessionID == "" {
+	if payload.SessionID == "" {
 		return
 	}
-	c.setSessionID(msg.Payload.SessionID)
-	c.log.Info("received register ack", "session_id", msg.Payload.SessionID)
+	c.setSessionID(payload.SessionID)
+	c.log.Info("received register ack", "session_id", payload.SessionID)
 }
 
 func (c *Client) setSessionID(sessionID string) {
@@ -221,4 +384,352 @@ func isTaskEnvelope(raw []byte) bool {
 		return false
 	}
 	return strings.HasPrefix(msg.Action, "task.")
+}
+
+func decodeEnvelope(raw []byte) (*envelope, bool) {
+	var env envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return nil, false
+	}
+	if env.Action == "" {
+		return nil, false
+	}
+	return &env, true
+}
+
+func (c *Client) observeInboundEnvelope(env envelope) error {
+	if env.Ack > 0 {
+		c.observePeerAck(env.Ack)
+	}
+
+	if env.Seq == 0 {
+		return nil
+	}
+
+	expected, ok, gap := c.observeInboundSeq(env.Seq)
+	if ok {
+		return nil
+	}
+	if gap {
+		return fmt.Errorf("%w: expected=%d got=%d", errSequenceGap, expected, env.Seq)
+	}
+
+	c.log.Warn("cts-core ws non-fatal sequence mismatch", "expected_seq", expected, "received_seq", env.Seq)
+	return nil
+}
+
+func (c *Client) resetSequenceState() {
+	c.seqMu.Lock()
+	c.inboundSeq = 0
+	c.outboundSeq = 0
+	c.peerAck = 0
+	c.pingSeq = 0
+	c.seqMu.Unlock()
+}
+
+func (c *Client) nextOutboundSeqAck() (seq uint64, ack uint64) {
+	c.seqMu.Lock()
+	c.outboundSeq++
+	seq = c.outboundSeq
+	ack = c.inboundSeq
+	c.seqMu.Unlock()
+	return seq, ack
+}
+
+func (c *Client) nextPingSeqAck() (seq uint64, ack uint64) {
+	c.seqMu.Lock()
+	c.pingSeq++
+	seq = c.pingSeq
+	ack = c.inboundSeq
+	c.seqMu.Unlock()
+	return seq, ack
+}
+
+func (c *Client) observeInboundSeq(seq uint64) (expected uint64, ok bool, gap bool) {
+	c.seqMu.Lock()
+	defer c.seqMu.Unlock()
+
+	if c.inboundSeq == 0 {
+		expected = 1
+		if seq == expected {
+			c.inboundSeq = seq
+			return expected, true, false
+		}
+		if seq > expected {
+			return expected, false, true
+		}
+		return expected, false, false
+	}
+
+	expected = c.inboundSeq + 1
+	if seq == expected {
+		c.inboundSeq = seq
+		return expected, true, false
+	}
+	if seq > expected {
+		return expected, false, true
+	}
+
+	return expected, false, false
+}
+
+func (c *Client) observePeerAck(ack uint64) {
+	c.seqMu.Lock()
+	if ack > c.peerAck {
+		c.peerAck = ack
+	}
+	c.seqMu.Unlock()
+}
+
+func (c *Client) closeConn(conn *websocket.Conn, code int, reason string) error {
+	if conn == nil {
+		return nil
+	}
+
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+
+	deadline := time.Now().Add(c.wsWriteTimeout())
+	_ = conn.SetWriteDeadline(deadline)
+	msg := websocket.FormatCloseMessage(code, reason)
+	return conn.WriteControl(websocket.CloseMessage, msg, deadline)
+}
+
+func (c *Client) buildDialer() (*websocket.Dialer, error) {
+	dialer := *websocket.DefaultDialer
+
+	tlsCfg, err := buildTLSConfig(c.cfg)
+	if err != nil {
+		return nil, err
+	}
+	if tlsCfg != nil {
+		dialer.TLSClientConfig = tlsCfg
+	}
+
+	return &dialer, nil
+}
+
+func buildTLSConfig(cfg config.CoreWSConfig) (*tls.Config, error) {
+	parsedURL, err := url.Parse(cfg.URL)
+	if err != nil {
+		return nil, fmt.Errorf("parse ws url: %w", err)
+	}
+	if parsedURL.Scheme != "wss" {
+		return nil, fmt.Errorf("core ws url must use wss scheme")
+	}
+
+	tlsCfg := &tls.Config{
+		InsecureSkipVerify: cfg.TLS.SkipVerify,
+		MinVersion:         tls.VersionTLS13,
+	}
+
+	serverName := cfg.TLS.ServerName
+	if serverName == "" {
+		serverName = parsedURL.Hostname()
+	}
+	if serverName != "" {
+		tlsCfg.ServerName = serverName
+	}
+
+	if strings.TrimSpace(cfg.TLS.CAPath) == "" {
+		return nil, fmt.Errorf("tls ca_path is required")
+	}
+
+	caPEM, err := os.ReadFile(cfg.TLS.CAPath)
+	if err != nil {
+		return nil, fmt.Errorf("read tls ca file: %w", err)
+	}
+	pool := x509.NewCertPool()
+	if ok := pool.AppendCertsFromPEM(caPEM); !ok {
+		return nil, fmt.Errorf("parse tls ca file: %s", cfg.TLS.CAPath)
+	}
+	tlsCfg.RootCAs = pool
+
+	if strings.TrimSpace(cfg.TLS.CertPath) == "" || strings.TrimSpace(cfg.TLS.KeyPath) == "" {
+		return nil, fmt.Errorf("tls client cert_path and key_path are required")
+	}
+	cert, err := tls.LoadX509KeyPair(cfg.TLS.CertPath, cfg.TLS.KeyPath)
+	if err != nil {
+		return nil, fmt.Errorf("load tls client cert/key: %w", err)
+	}
+	tlsCfg.Certificates = []tls.Certificate{cert}
+
+	return tlsCfg, nil
+}
+
+func (c *Client) prepareConn(conn *websocket.Conn) {
+	_ = conn.SetReadDeadline(time.Now().Add(defaultPongTimeout))
+	conn.SetPongHandler(func(appData string) error {
+		c.touchPong()
+		return conn.SetReadDeadline(time.Now().Add(defaultPongTimeout))
+	})
+}
+
+func (c *Client) pingLoop(ctx context.Context, conn *websocket.Conn) {
+	interval := defaultPingInterval
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := c.sendPing(conn); err != nil {
+				c.log.Warn("ws ping failed", "error", err)
+				_ = conn.Close()
+				return
+			}
+		}
+	}
+}
+
+func (c *Client) sendPing(conn *websocket.Conn) error {
+	seq, ack := c.nextPingSeqAck()
+	buf := make([]byte, 16)
+	binary.BigEndian.PutUint64(buf[0:8], seq)
+	binary.BigEndian.PutUint64(buf[8:16], ack)
+
+	c.pingMu.Lock()
+	c.lastPingAt = time.Now()
+	c.pingMu.Unlock()
+
+	deadline := time.Now().Add(c.wsWriteTimeout())
+	_ = conn.SetWriteDeadline(deadline)
+	if err := conn.WriteControl(websocket.PingMessage, buf, deadline); err != nil {
+		return err
+	}
+
+	c.log.Debug("ws ping sent", "seq", seq, "ack", ack)
+	return nil
+}
+
+func (c *Client) touchPong() {
+	c.pingMu.Lock()
+	if !c.lastPingAt.IsZero() {
+		c.lastRTT = time.Since(c.lastPingAt)
+	}
+	c.lastPongAt = time.Now()
+	c.pingMu.Unlock()
+	c.log.Debug("ws pong received")
+}
+
+func (c *Client) PingStats() PingStats {
+	c.pingMu.Lock()
+	stats := PingStats{
+		LastPingAt: c.lastPingAt,
+		LastPongAt: c.lastPongAt,
+		LastRTT:    c.lastRTT,
+	}
+	c.pingMu.Unlock()
+	return stats
+}
+
+func (c *Client) wsWriteTimeout() time.Duration {
+	if c.cfg.WriteTimeout <= 0 {
+		return defaultWriteTimeout
+	}
+	return c.cfg.WriteTimeout
+}
+
+func classifyReconnectReason(err error) string {
+	if err == nil {
+		return "unknown"
+	}
+
+	var closeErr *websocket.CloseError
+	if errors.As(err, &closeErr) {
+		if closeErr.Code == 4009 {
+			return reconnectReasonClose4009
+		}
+		return fmt.Sprintf("ws_close_%d", closeErr.Code)
+	}
+
+	if errors.Is(err, errSequenceGap) {
+		return "local_sequence_gap"
+	}
+	if errors.Is(err, context.Canceled) {
+		return "context_canceled"
+	}
+
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "i/o timeout") {
+		return "read_timeout"
+	}
+	if strings.Contains(msg, "dial") {
+		return "dial_error"
+	}
+
+	return "other_error"
+}
+
+func (c *Client) logSessionFinished(err error, reason string, total, reasonCount, gap4009Count uint64) {
+	level := c.reconnectLogLevel(reason, total, reasonCount)
+	log := c.log.With(
+		"error", err,
+		"reconnect_reason", reason,
+		"reconnect_total", total,
+		"reconnect_reason_count", reasonCount,
+		"reconnect_close_4009_seq_gap", gap4009Count,
+	)
+
+	switch level {
+	case slog.LevelDebug:
+		log.Debug("cts-core ws session finished")
+	case slog.LevelInfo:
+		log.Info("cts-core ws session finished")
+	case slog.LevelWarn:
+		log.Warn("cts-core ws session finished")
+	default:
+		log.Error("cts-core ws session finished")
+	}
+}
+
+func (c *Client) reconnectLogLevel(reason string, total, reasonCount uint64) slog.Level {
+	switch reason {
+	case "context_canceled", "context_done", "unknown":
+		return slog.LevelInfo
+	case reconnectReasonClose4009, "local_sequence_gap":
+		return slog.LevelError
+	}
+
+	if reasonCount >= reconnectErrorReasonThreshold || total >= reconnectErrorTotalThreshold {
+		return slog.LevelError
+	}
+
+	return slog.LevelWarn
+}
+
+func (c *Client) incrementReconnectReason(reason string) (total uint64, reasonCount uint64, close4009SeqGap uint64) {
+	if reason == "" {
+		reason = "unknown"
+	}
+
+	c.metricsMu.Lock()
+	c.reconnectTotal++
+	total = c.reconnectTotal
+	c.reconnectByReason[reason]++
+	reasonCount = c.reconnectByReason[reason]
+	if reason == reconnectReasonClose4009 {
+		c.reconnectSeqGapClose4++
+	}
+	close4009SeqGap = c.reconnectSeqGapClose4
+	c.metricsMu.Unlock()
+	return total, reasonCount, close4009SeqGap
+}
+
+func (c *Client) ReconnectMetrics() ReconnectMetrics {
+	c.metricsMu.Lock()
+	defer c.metricsMu.Unlock()
+
+	byReason := make(map[string]uint64, len(c.reconnectByReason))
+	for k, v := range c.reconnectByReason {
+		byReason[k] = v
+	}
+
+	return ReconnectMetrics{
+		Total:           c.reconnectTotal,
+		ByReason:        byReason,
+		Close4009SeqGap: c.reconnectSeqGapClose4,
+	}
 }

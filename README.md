@@ -54,6 +54,19 @@ go build -o trader cmd/trader/main.go
 - `trader` не пишет runtime-данные напрямую в MySQL; запись идет через `cts-core`.
 - REST в экосистеме сохраняется для control-plane и recovery/replay сценариев, но не как основной hot path для runtime доставки результатов от `trader`.
 
+Identity policy (trader WS):
+
+- `trader_id` определяется на стороне CTS-Core из CN клиентского сертификата.
+- `payload.trader_id` не используется для идентификации.
+- Для подключения в trader channel нужен клиентский сертификат с `OU=Trading`.
+
+## WS Write Timeout
+
+- Параметр: `core_connections.ws.write_timeout`.
+- Значение по умолчанию: `10s` (ориентировано на WAN).
+- ENV override: `TRADER_CORE_CONNECTIONS_WS_WRITE_TIMEOUT`.
+- Допустимый диапазон: `> 0` и `<= 24h`.
+
 ## Структура проекта (актуальная)
 
 ```text

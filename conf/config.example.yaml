@@ -24,16 +24,22 @@ orderbook:
 
 core_connections:
   ws:
-    enabled: false
-    url: "ws://localhost:8081/ws"
+    enabled: true
+    url: "wss://cts-core:8080/ws"
     reconnect_delay_sec: 5
     heartbeat_interval_sec: 5
-    trader_id: "trader-local"
+    write_timeout: 10s  # WAN-friendly WS write/control timeout
     version: "2.0.2"
     region: "local"
+    tls:
+      skip_verify: false
+      ca_path: "conf/ssl/ca.crt"
+      cert_path: "conf/ssl/trader-client.crt"
+      key_path: "conf/ssl/trader-client.key"
+      server_name: "cts-core"
   rest:
     enabled: false
-    url: "http://localhost:8081/api/v1"
+    url: "http://cts-core:8080/api/v1"
 
 databases:
   quotes:

@@ -3,6 +3,7 @@ package manager
 import (
 	"context"
 	"testing"
+	"time"
 
 	"trader/internal/config"
 	"trader/internal/core/exchange"
@@ -107,5 +108,68 @@ func TestApplyUpdateEnvelopeRemoveByID(t *testing.T) {
 	}
 	if tasksData.MonitoringTasks[0].ID != 2 {
 		t.Fatalf("unexpected remaining task id: %d", tasksData.MonitoringTasks[0].ID)
+	}
+}
+
+func TestRuntimeSnapshotReturnsDeepCopyOfTimePointers(t *testing.T) {
+	m := newTestManager()
+
+	now := time.Now().UTC()
+	later := now.Add(5 * time.Minute)
+	m.setSnapshot(func(s *RuntimeSnapshot) {
+		s.LastSyncAt = &now
+		s.LastSuccessAt = &later
+	})
+
+	snapshot := m.RuntimeSnapshot()
+	if snapshot.LastSuccessAt == nil {
+		t.Fatal("expected LastSuccessAt to be set")
+	}
+
+	mutated := snapshot.LastSuccessAt.Add(1 * time.Hour)
+	*snapshot.LastSuccessAt = mutated
+
+	fresh := m.RuntimeSnapshot()
+	if fresh.LastSuccessAt == nil {
+		t.Fatal("expected LastSuccessAt in fresh snapshot")
+	}
+	if fresh.LastSuccessAt.Equal(mutated) {
+		t.Fatalf("expected internal snapshot to remain unchanged, got mutated value %v", fresh.LastSuccessAt)
+	}
+	if !fresh.LastSuccessAt.Equal(later) {
+		t.Fatalf("expected original value %v, got %v", later, fresh.LastSuccessAt)
+	}
+}
+
+func TestStatusReturnsTimeValuesNotPointers(t *testing.T) {
+	m := newTestManager()
+
+	now := time.Now().UTC()
+	m.setSnapshot(func(s *RuntimeSnapshot) {
+		s.LastSyncAt = &now
+	})
+
+	status := m.Status()
+	runtimeRaw, ok := status["runtime"].(map[string]interface{})
+	if !ok {
+		t.Fatal("expected runtime status map")
+	}
+	if _, isPtr := runtimeRaw["last_sync_at"].(*time.Time); isPtr {
+		t.Fatal("expected last_sync_at to be a value, not pointer")
+	}
+	lastSyncValue, ok := runtimeRaw["last_sync_at"].(time.Time)
+	if !ok {
+		t.Fatalf("expected last_sync_at time.Time value, got %T", runtimeRaw["last_sync_at"])
+	}
+	if !lastSyncValue.Equal(now) {
+		t.Fatalf("expected last_sync_at=%v, got %v", now, lastSyncValue)
+	}
+
+	fresh := m.RuntimeSnapshot()
+	if fresh.LastSyncAt == nil {
+		t.Fatal("expected LastSyncAt in fresh snapshot")
+	}
+	if !fresh.LastSyncAt.Equal(now) {
+		t.Fatalf("expected original LastSyncAt %v, got %v", now, fresh.LastSyncAt)
 	}
 }

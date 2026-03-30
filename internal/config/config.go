@@ -4,6 +4,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -40,13 +41,22 @@ type CoreConnectionsConfig struct {
 }
 
 type CoreWSConfig struct {
-	Enabled              bool   `yaml:"enabled"`
-	URL                  string `yaml:"url"`
-	ReconnectDelaySec    int    `yaml:"reconnect_delay_sec"`
-	HeartbeatIntervalSec int    `yaml:"heartbeat_interval_sec"`
-	TraderID             string `yaml:"trader_id"`
-	Version              string `yaml:"version"`
-	Region               string `yaml:"region"`
+	Enabled              bool            `yaml:"enabled"`
+	URL                  string          `yaml:"url"`
+	ReconnectDelaySec    int             `yaml:"reconnect_delay_sec"`
+	HeartbeatIntervalSec int             `yaml:"heartbeat_interval_sec"`
+	WriteTimeout         time.Duration   `yaml:"write_timeout"`
+	Version              string          `yaml:"version"`
+	Region               string          `yaml:"region"`
+	TLS                  CoreWSTLSConfig `yaml:"tls"`
+}
+
+type CoreWSTLSConfig struct {
+	SkipVerify bool   `yaml:"skip_verify"`
+	CertPath   string `yaml:"cert_path"`
+	KeyPath    string `yaml:"key_path"`
+	CAPath     string `yaml:"ca_path"`
+	ServerName string `yaml:"server_name"`
 }
 
 type CoreRESTConfig struct {
@@ -249,8 +259,38 @@ func Load(path string) (*Config, error) {
 	}
 	applyDefaults(c)
 	applyEnvOverrides(c)
+	if err := validateConfig(c); err != nil {
+		return nil, err
+	}
 
 	return c, nil
+}
+
+func validateConfig(c *Config) error {
+	if c.CoreConnections.WS.WriteTimeout <= 0 || c.CoreConnections.WS.WriteTimeout > 24*time.Hour {
+		return fmt.Errorf("invalid core_connections.ws.write_timeout: %s", c.CoreConnections.WS.WriteTimeout)
+	}
+	if c.CoreConnections.WS.Enabled {
+		if strings.TrimSpace(c.CoreConnections.WS.URL) == "" {
+			return fmt.Errorf("core_connections.ws.url is required when core_connections.ws.enabled=true")
+		}
+
+		parsedURL, err := url.Parse(c.CoreConnections.WS.URL)
+		if err != nil || parsedURL.Scheme != "wss" {
+			return fmt.Errorf("core_connections.ws.url must use wss scheme")
+		}
+
+		if strings.TrimSpace(c.CoreConnections.WS.TLS.CAPath) == "" {
+			return fmt.Errorf("core_connections.ws.tls.ca_path is required when core_connections.ws.enabled=true")
+		}
+		if strings.TrimSpace(c.CoreConnections.WS.TLS.CertPath) == "" {
+			return fmt.Errorf("core_connections.ws.tls.cert_path is required when core_connections.ws.enabled=true")
+		}
+		if strings.TrimSpace(c.CoreConnections.WS.TLS.KeyPath) == "" {
+			return fmt.Errorf("core_connections.ws.tls.key_path is required when core_connections.ws.enabled=true")
+		}
+	}
+	return nil
 }
 
 func defaultConfig() *Config {
@@ -322,12 +362,15 @@ func defaultConfig() *Config {
 		CoreConnections: CoreConnectionsConfig{
 			WS: CoreWSConfig{
 				Enabled:              false,
-				URL:                  "ws://localhost:8081/ws",
+				URL:                  "wss://localhost:8081/ws",
 				ReconnectDelaySec:    5,
 				HeartbeatIntervalSec: 5,
-				TraderID:             "trader-local",
+				WriteTimeout:         10 * time.Second,
 				Version:              "2.0.2",
 				Region:               "local",
+				TLS: CoreWSTLSConfig{
+					SkipVerify: false,
+				},
 			},
 			REST: CoreRESTConfig{
 				Enabled: false,
@@ -446,7 +489,7 @@ func applyDefaults(c *Config) {
 		c.Databases.Quotes.ClickHouse.Pool.ReplicationFactor = 1
 	}
 	if c.CoreConnections.WS.URL == "" {
-		c.CoreConnections.WS.URL = "ws://localhost:8081/ws"
+		c.CoreConnections.WS.URL = "wss://localhost:8081/ws"
 	}
 	if c.CoreConnections.WS.ReconnectDelaySec <= 0 {
 		c.CoreConnections.WS.ReconnectDelaySec = 5
@@ -454,8 +497,8 @@ func applyDefaults(c *Config) {
 	if c.CoreConnections.WS.HeartbeatIntervalSec <= 0 {
 		c.CoreConnections.WS.HeartbeatIntervalSec = 5
 	}
-	if c.CoreConnections.WS.TraderID == "" {
-		c.CoreConnections.WS.TraderID = "trader-local"
+	if c.CoreConnections.WS.WriteTimeout <= 0 {
+		c.CoreConnections.WS.WriteTimeout = 10 * time.Second
 	}
 	if c.CoreConnections.WS.Version == "" {
 		c.CoreConnections.WS.Version = "2.0.2"
@@ -514,9 +557,14 @@ func applyEnvOverrides(c *Config) {
 	c.CoreConnections.WS.URL = envString("TRADER_CORE_CONNECTIONS_WS_URL", c.CoreConnections.WS.URL)
 	c.CoreConnections.WS.ReconnectDelaySec = envInt("TRADER_CORE_CONNECTIONS_WS_RECONNECT_DELAY_SEC", c.CoreConnections.WS.ReconnectDelaySec)
 	c.CoreConnections.WS.HeartbeatIntervalSec = envInt("TRADER_CORE_CONNECTIONS_WS_HEARTBEAT_INTERVAL_SEC", c.CoreConnections.WS.HeartbeatIntervalSec)
-	c.CoreConnections.WS.TraderID = envString("TRADER_CORE_CONNECTIONS_WS_TRADER_ID", c.CoreConnections.WS.TraderID)
+	c.CoreConnections.WS.WriteTimeout = envDuration("TRADER_CORE_CONNECTIONS_WS_WRITE_TIMEOUT", c.CoreConnections.WS.WriteTimeout)
 	c.CoreConnections.WS.Version = envString("TRADER_CORE_CONNECTIONS_WS_VERSION", c.CoreConnections.WS.Version)
 	c.CoreConnections.WS.Region = envString("TRADER_CORE_CONNECTIONS_WS_REGION", c.CoreConnections.WS.Region)
+	c.CoreConnections.WS.TLS.SkipVerify = envBool("TRADER_CORE_CONNECTIONS_WS_TLS_SKIP_VERIFY", c.CoreConnections.WS.TLS.SkipVerify)
+	c.CoreConnections.WS.TLS.CAPath = envString("TRADER_CORE_CONNECTIONS_WS_TLS_CA_PATH", c.CoreConnections.WS.TLS.CAPath)
+	c.CoreConnections.WS.TLS.CertPath = envString("TRADER_CORE_CONNECTIONS_WS_TLS_CERT_PATH", c.CoreConnections.WS.TLS.CertPath)
+	c.CoreConnections.WS.TLS.KeyPath = envString("TRADER_CORE_CONNECTIONS_WS_TLS_KEY_PATH", c.CoreConnections.WS.TLS.KeyPath)
+	c.CoreConnections.WS.TLS.ServerName = envString("TRADER_CORE_CONNECTIONS_WS_TLS_SERVER_NAME", c.CoreConnections.WS.TLS.ServerName)
 
 	c.CoreConnections.REST.Enabled = envBool("TRADER_CORE_CONNECTIONS_REST_ENABLED", c.CoreConnections.REST.Enabled)
 	c.CoreConnections.REST.URL = envString("TRADER_CORE_CONNECTIONS_REST_URL", c.CoreConnections.REST.URL)
