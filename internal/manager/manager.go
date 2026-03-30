@@ -33,7 +33,6 @@ type Manager struct {
 	shutdownTime time.Time
 	shutdownErr  error
 
-	loopInterval time.Duration
 	loopSource   task.Source
 	loopSubMgr   *task.SubscriptionManager
 	coreWSClient *ctscorews.Client
@@ -70,18 +69,12 @@ func New(cfg *config.Config) *Manager {
 	loopSubMgr := task.NewSubscriptionManager(wsPool)
 	loopSource := task.NewStaticSource()
 
-	interval := time.Duration(cfg.Trade.UpdateInterval) * time.Second
-	if interval <= 0 {
-		interval = 5 * time.Second
-	}
-
 	m := &Manager{
-		cfg:          cfg,
-		ctx:          ctx,
-		cancel:       cancel,
-		loopInterval: interval,
-		loopSource:   loopSource,
-		loopSubMgr:   loopSubMgr,
+		cfg:        cfg,
+		ctx:        ctx,
+		cancel:     cancel,
+		loopSource: loopSource,
+		loopSubMgr: loopSubMgr,
 		snapshot: RuntimeSnapshot{
 			Running: false,
 		},
@@ -110,7 +103,7 @@ func (m *Manager) Start() error {
 	m.startTime = time.Now()
 	m.shutdownErr = nil
 
-	logger.Get("manager").Info("Starting runtime loop", "interval", m.loopInterval)
+	logger.Get("manager").Info("Starting runtime loop", "mode", "startup+event")
 
 	if err := state.GetInstance().SetRunning(true); err != nil {
 		logger.Get("manager").Error("Failed to persist running state", "error", err)
@@ -131,7 +124,7 @@ func (m *Manager) Start() error {
 			defer m.wg.Done()
 			m.coreWSClient.Run(m.ctx)
 		}()
-		logger.Get("manager").Info("CTS-Core WS client started", "url", m.cfg.CoreConnections.WS.URL)
+		logger.Get("manager").Info("CTS-Core WS client starting", "url", m.cfg.CoreConnections.WS.URL)
 	}
 
 	logger.Get("manager").Info("Runtime loop started")
@@ -213,9 +206,6 @@ func (m *Manager) runLoop() {
 	watchCh := m.loopSource.Watch(m.ctx)
 	m.runIteration("startup")
 
-	ticker := time.NewTicker(m.loopInterval)
-	defer ticker.Stop()
-
 	for {
 		select {
 		case <-m.ctx.Done():
@@ -227,8 +217,6 @@ func (m *Manager) runLoop() {
 				continue
 			}
 			m.runIteration("event")
-		case <-ticker.C:
-			m.runIteration("reconcile")
 		}
 	}
 }
@@ -243,7 +231,7 @@ func (m *Manager) runIteration(trigger string) {
 		s.LastTrigger = trigger
 	})
 
-	log.Info("sync started", "iteration", iteration, "trigger", trigger)
+	log.Debug("sync started", "iteration", iteration, "trigger", trigger)
 	tasksData, err := m.loopSource.GetTasks(m.ctx)
 	syncAt := time.Now().UTC()
 	if err != nil {
@@ -255,7 +243,7 @@ func (m *Manager) runIteration(trigger string) {
 		s.LastSyncAt = &syncAt
 	})
 
-	log.Info("diff started", "iteration", iteration, "trigger", trigger)
+	log.Debug("diff started", "iteration", iteration, "trigger", trigger)
 	diff, err := m.loopSubMgr.Merge(tasksData)
 	diffAt := time.Now().UTC()
 	if err != nil {
@@ -267,7 +255,7 @@ func (m *Manager) runIteration(trigger string) {
 		s.LastDiffAt = &diffAt
 	})
 
-	log.Info("apply started", "iteration", iteration, "trigger", trigger, "to_subscribe", len(diff.ToSubscribe), "to_unsubscribe", len(diff.Unsubscribe))
+	log.Debug("apply started", "iteration", iteration, "trigger", trigger, "to_subscribe", len(diff.ToSubscribe), "to_unsubscribe", len(diff.Unsubscribe))
 	if err := m.loopSubMgr.ApplyDiff(diff); err != nil {
 		m.recordLoopError("apply", err, iteration)
 		log.Error("apply failed", "iteration", iteration, "trigger", trigger, "error", err)
@@ -284,7 +272,7 @@ func (m *Manager) runIteration(trigger string) {
 		s.LastUnsubscribe = len(diff.Unsubscribe)
 	})
 
-	log.Info("iteration complete", "iteration", iteration, "trigger", trigger, "to_subscribe", len(diff.ToSubscribe), "to_unsubscribe", len(diff.Unsubscribe))
+	log.Debug("iteration complete", "iteration", iteration, "trigger", trigger, "to_subscribe", len(diff.ToSubscribe), "to_unsubscribe", len(diff.Unsubscribe))
 }
 
 func (m *Manager) recordLoopError(stage string, err error, iteration int64) {

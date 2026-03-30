@@ -19,8 +19,6 @@ import (
 type Config struct {
 	// Logging - параметры логирования
 	Logging LogConfig `yaml:"logging"`
-	// Trade - параметры торговых операций
-	Trade TradeConfig `yaml:"trade"`
 	// OrderBook - параметры управления книгой ордеров
 	OrderBook OrderBookConfig `yaml:"orderbook"`
 	// Role - роль демона: "monitor" (сбор данных), "trader" (торговля) или "both" (оба)
@@ -126,12 +124,6 @@ type LogConfig struct {
 	WSOutToStdout bool `yaml:"ws_out_to_stdout"`
 	// AuditToStdout - дублировать audit.log в stdout
 	AuditToStdout bool `yaml:"audit_to_stdout"`
-}
-
-// TradeConfig - конфигурация торговых операций
-type TradeConfig struct {
-	// UpdateInterval - интервал обновления статуса торговых позиций в секундах
-	UpdateInterval int `yaml:"update_interval"`
 }
 
 // MonitorConfig - конфигурация для режима Monitor
@@ -254,6 +246,9 @@ func Load(path string) (*Config, error) {
 	if hasCoreWSTLSSkipVerify(data) {
 		return nil, fmt.Errorf("core_connections.ws.tls.skip_verify is no longer supported; remove this key")
 	}
+	if hasLegacyTradeSection(data) {
+		return nil, fmt.Errorf("trade section is no longer supported; remove trade.update_interval from config")
+	}
 
 	c := defaultConfig()
 	if err := yaml.Unmarshal(data, c); err != nil {
@@ -312,6 +307,16 @@ func asStringMap(value interface{}) map[string]interface{} {
 	return nil
 }
 
+func hasLegacyTradeSection(data []byte) bool {
+	var raw map[string]interface{}
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		return false
+	}
+
+	_, exists := raw["trade"]
+	return exists
+}
+
 func validateConfig(c *Config) error {
 	if raw, ok := os.LookupEnv("TRADER_CORE_CONNECTIONS_WS_TLS_SKIP_VERIFY"); ok && strings.TrimSpace(raw) != "" {
 		return fmt.Errorf("TRADER_CORE_CONNECTIONS_WS_TLS_SKIP_VERIFY is no longer supported")
@@ -363,7 +368,6 @@ func defaultConfig() *Config {
 			WSOutToStdout:      true,
 			AuditToStdout:      true,
 		},
-		Trade: TradeConfig{UpdateInterval: 5},
 		OrderBook: OrderBookConfig{
 			DebugLogRaw: false,
 			DebugLogMsg: false,
@@ -461,10 +465,6 @@ func applyDefaults(c *Config) {
 	}
 	if c.Logging.MaxAgeDays == 0 {
 		c.Logging.MaxAgeDays = 30
-	}
-
-	if c.Trade.UpdateInterval == 0 {
-		c.Trade.UpdateInterval = 5
 	}
 
 	if c.Role == "" {

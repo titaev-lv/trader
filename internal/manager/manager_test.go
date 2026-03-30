@@ -11,9 +11,7 @@ import (
 )
 
 func newTestManager() *Manager {
-	return New(&config.Config{
-		Trade: config.TradeConfig{UpdateInterval: 60},
-	})
+	return New(&config.Config{})
 }
 
 func TestApplyUpdateCommandReplaceUpdatesSource(t *testing.T) {

@@ -15,9 +15,6 @@ trader:
   slippage_percent: 0.5
   enable_backtest: false
 
-trade:
-  update_interval: 5
-
 orderbook:
   debug_log_raw: false
   debug_log_msg: false
