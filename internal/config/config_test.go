@@ -60,6 +60,31 @@ func TestLoadRejectsCoreWSWriteTimeoutFromEnvWhenInvalid(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsDeprecatedCoreWSSkipVerifyKey(t *testing.T) {
+	path := writeTestConfig(t, "core_connections:\n  ws:\n    enabled: true\n    url: \"wss://core.example/ws\"\n    write_timeout: 5s\n    tls:\n      skip_verify: true\n      ca_path: \"ca.crt\"\n      cert_path: \"client.crt\"\n      key_path: \"client.key\"\n")
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected Load() to fail for deprecated core_connections.ws.tls.skip_verify")
+	}
+	if !strings.Contains(err.Error(), "core_connections.ws.tls.skip_verify is no longer supported") {
+		t.Fatalf("expected deprecated skip_verify error, got %v", err)
+	}
+}
+
+func TestLoadRejectsDeprecatedCoreWSSkipVerifyEnv(t *testing.T) {
+	t.Setenv("TRADER_CORE_CONNECTIONS_WS_TLS_SKIP_VERIFY", "true")
+	path := writeTestConfig(t, "core_connections:\n  ws:\n    write_timeout: 5s\n")
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected Load() to fail for deprecated TRADER_CORE_CONNECTIONS_WS_TLS_SKIP_VERIFY")
+	}
+	if !strings.Contains(err.Error(), "TRADER_CORE_CONNECTIONS_WS_TLS_SKIP_VERIFY is no longer supported") {
+		t.Fatalf("expected deprecated env error, got %v", err)
+	}
+}
+
 func writeTestConfig(t *testing.T, content string) string {
 	t.Helper()
 	dir := t.TempDir()

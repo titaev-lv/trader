@@ -52,7 +52,6 @@ type CoreWSConfig struct {
 }
 
 type CoreWSTLSConfig struct {
-	SkipVerify bool   `yaml:"skip_verify"`
 	CertPath   string `yaml:"cert_path"`
 	KeyPath    string `yaml:"key_path"`
 	CAPath     string `yaml:"ca_path"`
@@ -252,6 +251,9 @@ func Load(path string) (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to load config file: %w", err)
 	}
+	if hasCoreWSTLSSkipVerify(data) {
+		return nil, fmt.Errorf("core_connections.ws.tls.skip_verify is no longer supported; remove this key")
+	}
 
 	c := defaultConfig()
 	if err := yaml.Unmarshal(data, c); err != nil {
@@ -266,7 +268,55 @@ func Load(path string) (*Config, error) {
 	return c, nil
 }
 
+func hasCoreWSTLSSkipVerify(data []byte) bool {
+	var raw map[string]interface{}
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		return false
+	}
+
+	core := asStringMap(raw["core_connections"])
+	if core == nil {
+		return false
+	}
+	ws := asStringMap(core["ws"])
+	if ws == nil {
+		return false
+	}
+	tlsCfg := asStringMap(ws["tls"])
+	if tlsCfg == nil {
+		return false
+	}
+
+	_, exists := tlsCfg["skip_verify"]
+	return exists
+}
+
+func asStringMap(value interface{}) map[string]interface{} {
+	if value == nil {
+		return nil
+	}
+	if m, ok := value.(map[string]interface{}); ok {
+		return m
+	}
+	if m, ok := value.(map[interface{}]interface{}); ok {
+		out := make(map[string]interface{}, len(m))
+		for k, v := range m {
+			ks, ok := k.(string)
+			if !ok {
+				continue
+			}
+			out[ks] = v
+		}
+		return out
+	}
+	return nil
+}
+
 func validateConfig(c *Config) error {
+	if raw, ok := os.LookupEnv("TRADER_CORE_CONNECTIONS_WS_TLS_SKIP_VERIFY"); ok && strings.TrimSpace(raw) != "" {
+		return fmt.Errorf("TRADER_CORE_CONNECTIONS_WS_TLS_SKIP_VERIFY is no longer supported")
+	}
+
 	if c.CoreConnections.WS.WriteTimeout <= 0 || c.CoreConnections.WS.WriteTimeout > 24*time.Hour {
 		return fmt.Errorf("invalid core_connections.ws.write_timeout: %s", c.CoreConnections.WS.WriteTimeout)
 	}
@@ -363,14 +413,12 @@ func defaultConfig() *Config {
 			WS: CoreWSConfig{
 				Enabled:              false,
 				URL:                  "wss://localhost:8081/ws",
-				ReconnectDelaySec:    5,
+				ReconnectDelaySec:    1,
 				HeartbeatIntervalSec: 5,
-				WriteTimeout:         10 * time.Second,
+				WriteTimeout:         5 * time.Second,
 				Version:              "2.0.2",
 				Region:               "local",
-				TLS: CoreWSTLSConfig{
-					SkipVerify: false,
-				},
+				TLS:                  CoreWSTLSConfig{},
 			},
 			REST: CoreRESTConfig{
 				Enabled: false,
@@ -492,13 +540,13 @@ func applyDefaults(c *Config) {
 		c.CoreConnections.WS.URL = "wss://localhost:8081/ws"
 	}
 	if c.CoreConnections.WS.ReconnectDelaySec <= 0 {
-		c.CoreConnections.WS.ReconnectDelaySec = 5
+		c.CoreConnections.WS.ReconnectDelaySec = 1
 	}
 	if c.CoreConnections.WS.HeartbeatIntervalSec <= 0 {
 		c.CoreConnections.WS.HeartbeatIntervalSec = 5
 	}
 	if c.CoreConnections.WS.WriteTimeout <= 0 {
-		c.CoreConnections.WS.WriteTimeout = 10 * time.Second
+		c.CoreConnections.WS.WriteTimeout = 5 * time.Second
 	}
 	if c.CoreConnections.WS.Version == "" {
 		c.CoreConnections.WS.Version = "2.0.2"
@@ -560,7 +608,6 @@ func applyEnvOverrides(c *Config) {
 	c.CoreConnections.WS.WriteTimeout = envDuration("TRADER_CORE_CONNECTIONS_WS_WRITE_TIMEOUT", c.CoreConnections.WS.WriteTimeout)
 	c.CoreConnections.WS.Version = envString("TRADER_CORE_CONNECTIONS_WS_VERSION", c.CoreConnections.WS.Version)
 	c.CoreConnections.WS.Region = envString("TRADER_CORE_CONNECTIONS_WS_REGION", c.CoreConnections.WS.Region)
-	c.CoreConnections.WS.TLS.SkipVerify = envBool("TRADER_CORE_CONNECTIONS_WS_TLS_SKIP_VERIFY", c.CoreConnections.WS.TLS.SkipVerify)
 	c.CoreConnections.WS.TLS.CAPath = envString("TRADER_CORE_CONNECTIONS_WS_TLS_CA_PATH", c.CoreConnections.WS.TLS.CAPath)
 	c.CoreConnections.WS.TLS.CertPath = envString("TRADER_CORE_CONNECTIONS_WS_TLS_CERT_PATH", c.CoreConnections.WS.TLS.CertPath)
 	c.CoreConnections.WS.TLS.KeyPath = envString("TRADER_CORE_CONNECTIONS_WS_TLS_KEY_PATH", c.CoreConnections.WS.TLS.KeyPath)

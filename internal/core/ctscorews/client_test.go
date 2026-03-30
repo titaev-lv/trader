@@ -134,6 +134,9 @@ func TestBuildTLSConfigUsesURLServerName(t *testing.T) {
 	if tlsCfg.MinVersion != tls.VersionTLS13 {
 		t.Fatalf("expected min version tls1.3, got %v", tlsCfg.MinVersion)
 	}
+	if tlsCfg.InsecureSkipVerify {
+		t.Fatalf("expected InsecureSkipVerify=false")
+	}
 }
 
 func TestBuildTLSConfigRejectsPlainWS(t *testing.T) {
@@ -203,6 +206,86 @@ func TestWSWriteTimeoutFallsBackToDefault(t *testing.T) {
 	}
 }
 
+func TestCloseConnWaitsForPeerCloseFrame(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(_ *http.Request) bool { return true }}
+	peerCloseSeen := make(chan struct{}, 1)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		for {
+			_, _, readErr := conn.ReadMessage()
+			if readErr != nil {
+				if _, ok := readErr.(*websocket.CloseError); ok {
+					peerCloseSeen <- struct{}{}
+				}
+				return
+			}
+		}
+	})
+
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	c := New(config.CoreWSConfig{WriteTimeout: 200 * time.Millisecond}, nil)
+	if err := c.closeConn(conn, websocket.CloseNormalClosure, "shutdown"); err != nil {
+		t.Fatalf("closeConn: %v", err)
+	}
+
+	select {
+	case <-peerCloseSeen:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatalf("expected peer to observe close frame")
+	}
+}
+
+func TestCloseConnTimeoutWhenPeerDoesNotRespond(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(_ *http.Request) bool { return true }}
+	releasePeer := make(chan struct{})
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		<-releasePeer
+	})
+
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+	defer close(releasePeer)
+
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	c := New(config.CoreWSConfig{WriteTimeout: 60 * time.Millisecond}, nil)
+	err = c.closeConn(conn, websocket.CloseNormalClosure, "shutdown")
+	if err == nil {
+		t.Fatalf("expected close handshake timeout error")
+	}
+	if !strings.Contains(err.Error(), "close handshake timeout") {
+		t.Fatalf("expected close handshake timeout error, got %v", err)
+	}
+}
+
 func TestReconnectBackoffWithJitterAndReset(t *testing.T) {
 	r := rand.New(rand.NewSource(1))
 	b := newReconnectBackoff(config.CoreWSConfig{ReconnectDelaySec: 1}, r)
@@ -217,9 +300,15 @@ func TestReconnectBackoffWithJitterAndReset(t *testing.T) {
 		t.Fatalf("expected second backoff ~2.2-2.4s, got %v", d2)
 	}
 
-	d3 := b.next(65 * time.Second) // stable session uptime triggers reset
-	if d3 < time.Duration(float64(time.Second)*1.1) || d3 > time.Duration(float64(time.Second)*1.2) {
-		t.Fatalf("expected reset backoff ~1.1-1.2s after long uptime, got %v", d3)
+	d3 := b.next(5 * time.Second)
+	d3Base := 3 * time.Second
+	if d3 < time.Duration(float64(d3Base)*1.1) || d3 > time.Duration(float64(d3Base)*1.2) {
+		t.Fatalf("expected third backoff ~3.3-3.6s, got %v", d3)
+	}
+
+	d4 := b.next(65 * time.Second) // stable session uptime triggers reset
+	if d4 < time.Duration(float64(time.Second)*1.1) || d4 > time.Duration(float64(time.Second)*1.2) {
+		t.Fatalf("expected reset backoff ~1.1-1.2s after long uptime, got %v", d4)
 	}
 }
 
@@ -267,16 +356,36 @@ func TestObserveInboundSeqGap(t *testing.T) {
 func TestObserveInboundEnvelopeGapError(t *testing.T) {
 	c := New(config.CoreWSConfig{}, nil)
 
-	if err := c.observeInboundEnvelope(envelope{Seq: 1}); err != nil {
+	if shouldProcess, err := c.observeInboundEnvelope(envelope{Seq: 1}); err != nil {
 		t.Fatalf("expected seq=1 to pass, got %v", err)
+	} else if !shouldProcess {
+		t.Fatalf("expected seq=1 to be processed")
 	}
 
-	err := c.observeInboundEnvelope(envelope{Seq: 3})
+	_, err := c.observeInboundEnvelope(envelope{Seq: 3})
 	if err == nil {
 		t.Fatalf("expected sequence gap error")
 	}
 	if !strings.Contains(err.Error(), errSequenceGap.Error()) {
 		t.Fatalf("expected errSequenceGap in error, got %v", err)
+	}
+}
+
+func TestObserveInboundEnvelopeDuplicateIgnored(t *testing.T) {
+	c := New(config.CoreWSConfig{}, nil)
+
+	if shouldProcess, err := c.observeInboundEnvelope(envelope{Seq: 1}); err != nil {
+		t.Fatalf("expected seq=1 to pass, got %v", err)
+	} else if !shouldProcess {
+		t.Fatalf("expected seq=1 to be processed")
+	}
+
+	shouldProcess, err := c.observeInboundEnvelope(envelope{Seq: 1})
+	if err != nil {
+		t.Fatalf("expected duplicate seq to be ignored without error, got %v", err)
+	}
+	if shouldProcess {
+		t.Fatalf("expected duplicate seq to be ignored")
 	}
 }
 

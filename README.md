@@ -63,7 +63,7 @@ Identity policy (trader WS):
 ## WS Write Timeout
 
 - Параметр: `core_connections.ws.write_timeout`.
-- Значение по умолчанию: `10s` (ориентировано на WAN).
+- Значение по умолчанию: `5s`.
 - ENV override: `TRADER_CORE_CONNECTIONS_WS_WRITE_TIMEOUT`.
 - Допустимый диапазон: `> 0` и `<= 24h`.
 

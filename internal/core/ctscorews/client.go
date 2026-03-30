@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand"
+	"net"
 	"net/url"
 	"os"
 	"strings"
@@ -60,12 +61,13 @@ const (
 
 	defaultPingInterval = 10 * time.Second
 	defaultPongTimeout  = 30 * time.Second
-	defaultWriteTimeout = 10 * time.Second
+	defaultWriteTimeout = 5 * time.Second
 )
 
 type reconnectBackoff struct {
 	min        time.Duration
 	max        time.Duration
+	step       time.Duration
 	current    time.Duration
 	resetAfter time.Duration
 	rand       *rand.Rand
@@ -80,6 +82,7 @@ func newReconnectBackoff(cfg config.CoreWSConfig, r *rand.Rand) *reconnectBackof
 	if min > max {
 		max = min
 	}
+	step := 1 * time.Second
 	if r == nil {
 		r = rand.New(rand.NewSource(time.Now().UnixNano()))
 	}
@@ -87,6 +90,7 @@ func newReconnectBackoff(cfg config.CoreWSConfig, r *rand.Rand) *reconnectBackof
 	return &reconnectBackoff{
 		min:        min,
 		max:        max,
+		step:       step,
 		resetAfter: 60 * time.Second,
 		rand:       r,
 	}
@@ -105,7 +109,7 @@ func (b *reconnectBackoff) next(uptime time.Duration) time.Duration {
 	if b.current == 0 {
 		b.current = b.min
 	} else {
-		b.current *= 2
+		b.current += b.step
 		if b.current > b.max {
 			b.current = b.max
 		}
@@ -157,7 +161,7 @@ func New(cfg config.CoreWSConfig, handler HandlerFunc) *Client {
 func (c *Client) Run(ctx context.Context) {
 	reconnectDelay := time.Duration(c.cfg.ReconnectDelaySec) * time.Second
 	if reconnectDelay <= 0 {
-		reconnectDelay = 5 * time.Second
+		reconnectDelay = 1 * time.Second
 	}
 
 	for {
@@ -204,7 +208,9 @@ func (c *Client) runSession(ctx context.Context) error {
 		return fmt.Errorf("dial cts-core ws: %w", err)
 	}
 	defer func() {
-		_ = c.closeConn(conn, websocket.CloseNormalClosure, "shutdown")
+		if err := c.closeConn(conn, websocket.CloseNormalClosure, "shutdown"); err != nil {
+			c.log.Debug("ws close handshake incomplete", "error", err)
+		}
 		conn.Close()
 	}()
 
@@ -235,9 +241,13 @@ func (c *Client) runSession(ctx context.Context) error {
 		env, ok := decodeEnvelope(raw)
 		if ok {
 			c.log.Debug("ws in", "action", env.Action, "seq", env.Seq, "ack", env.Ack)
-			if gapErr := c.observeInboundEnvelope(*env); gapErr != nil {
+			shouldProcess, gapErr := c.observeInboundEnvelope(*env)
+			if gapErr != nil {
 				c.log.Warn("cts-core ws sequence gap detected, reconnecting", "error", gapErr)
 				return gapErr
+			}
+			if !shouldProcess {
+				continue
 			}
 			if env.Action == "trader.register_ack" {
 				c.captureSessionID(*env)
@@ -397,25 +407,25 @@ func decodeEnvelope(raw []byte) (*envelope, bool) {
 	return &env, true
 }
 
-func (c *Client) observeInboundEnvelope(env envelope) error {
+func (c *Client) observeInboundEnvelope(env envelope) (bool, error) {
 	if env.Ack > 0 {
 		c.observePeerAck(env.Ack)
 	}
 
 	if env.Seq == 0 {
-		return nil
+		return true, nil
 	}
 
 	expected, ok, gap := c.observeInboundSeq(env.Seq)
 	if ok {
-		return nil
+		return true, nil
 	}
 	if gap {
-		return fmt.Errorf("%w: expected=%d got=%d", errSequenceGap, expected, env.Seq)
+		return false, fmt.Errorf("%w: expected=%d got=%d", errSequenceGap, expected, env.Seq)
 	}
 
-	c.log.Warn("cts-core ws non-fatal sequence mismatch", "expected_seq", expected, "received_seq", env.Seq)
-	return nil
+	c.log.Debug("cts-core ws duplicate inbound envelope ignored", "expected_seq", expected, "received_seq", env.Seq)
+	return false, nil
 }
 
 func (c *Client) resetSequenceState() {
@@ -485,14 +495,66 @@ func (c *Client) closeConn(conn *websocket.Conn, code int, reason string) error 
 	if conn == nil {
 		return nil
 	}
+	if reason == "" {
+		reason = "shutdown"
+	}
 
 	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
-
 	deadline := time.Now().Add(c.wsWriteTimeout())
 	_ = conn.SetWriteDeadline(deadline)
 	msg := websocket.FormatCloseMessage(code, reason)
-	return conn.WriteControl(websocket.CloseMessage, msg, deadline)
+	writeErr := conn.WriteControl(websocket.CloseMessage, msg, deadline)
+	c.writeMu.Unlock()
+	if writeErr != nil {
+		return writeErr
+	}
+
+	return c.awaitCloseFrame(conn)
+}
+
+func (c *Client) awaitCloseFrame(conn *websocket.Conn) error {
+	if conn == nil {
+		return nil
+	}
+
+	deadline := time.Now().Add(c.wsCloseWaitTimeout())
+	if err := conn.SetReadDeadline(deadline); err != nil {
+		return err
+	}
+	defer func() {
+		_ = conn.SetReadDeadline(time.Time{})
+	}()
+
+	for {
+		msgType, _, err := conn.ReadMessage()
+		if err != nil {
+			var closeErr *websocket.CloseError
+			if errors.As(err, &closeErr) {
+				return nil
+			}
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				return fmt.Errorf("close handshake timeout: %w", err)
+			}
+			if errors.Is(err, net.ErrClosed) {
+				return nil
+			}
+			return err
+		}
+		if msgType == websocket.CloseMessage {
+			return nil
+		}
+	}
+}
+
+func (c *Client) wsCloseWaitTimeout() time.Duration {
+	wait := c.wsWriteTimeout()
+	if wait <= 0 {
+		wait = defaultWriteTimeout
+	}
+	if wait > 2*time.Second {
+		return 2 * time.Second
+	}
+	return wait
 }
 
 func (c *Client) buildDialer() (*websocket.Dialer, error) {
@@ -519,7 +581,7 @@ func buildTLSConfig(cfg config.CoreWSConfig) (*tls.Config, error) {
 	}
 
 	tlsCfg := &tls.Config{
-		InsecureSkipVerify: cfg.TLS.SkipVerify,
+		InsecureSkipVerify: false,
 		MinVersion:         tls.VersionTLS13,
 	}
 

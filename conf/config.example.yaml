@@ -26,13 +26,12 @@ core_connections:
   ws:
     enabled: true
     url: "wss://cts-core:8080/ws"
-    reconnect_delay_sec: 5
+    reconnect_delay_sec: 1
     heartbeat_interval_sec: 5
-    write_timeout: 10s  # WAN-friendly WS write/control timeout
+    write_timeout: 5s
     version: "2.0.2"
     region: "local"
     tls:
-      skip_verify: false
       ca_path: "conf/ssl/ca.crt"
       cert_path: "conf/ssl/trader-client.crt"
       key_path: "conf/ssl/trader-client.key"
