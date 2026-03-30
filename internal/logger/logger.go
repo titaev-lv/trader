@@ -65,60 +65,45 @@ func Init(levelStr, format string, maxFileSizeMB int, maxBackups int, maxAgeDays
 	if err := ensureLogFileExists(errorLogPath); err != nil {
 		return err
 	}
-	errorLogFile := &lumberjack.Logger{
-		Filename:   errorLogPath,
-		MaxSize:    maxFileSizeMB,
-		MaxBackups: maxBackups,
-		MaxAge:     maxAgeDays,
-		Compress:   compress,
+	errorLogFile, err := newRotatingLogFile(errorLogPath, maxFileSizeMB, maxBackups, maxAgeDays, compress)
+	if err != nil {
+		return err
 	}
 	logFiles["error"] = errorLogFile
 
 	if err := ensureLogFileExists(outRequestLogPath); err != nil {
 		return err
 	}
-	outRequestLogFile := &lumberjack.Logger{
-		Filename:   outRequestLogPath,
-		MaxSize:    maxFileSizeMB,
-		MaxBackups: maxBackups,
-		MaxAge:     maxAgeDays,
-		Compress:   compress,
+	outRequestLogFile, err := newRotatingLogFile(outRequestLogPath, maxFileSizeMB, maxBackups, maxAgeDays, compress)
+	if err != nil {
+		return err
 	}
 	logFiles["out_request"] = outRequestLogFile
 
 	if err := ensureLogFileExists(wsInLogPath); err != nil {
 		return err
 	}
-	wsInLogFile := &lumberjack.Logger{
-		Filename:   wsInLogPath,
-		MaxSize:    maxFileSizeMB,
-		MaxBackups: maxBackups,
-		MaxAge:     maxAgeDays,
-		Compress:   compress,
+	wsInLogFile, err := newRotatingLogFile(wsInLogPath, maxFileSizeMB, maxBackups, maxAgeDays, compress)
+	if err != nil {
+		return err
 	}
 	logFiles["ws_in"] = wsInLogFile
 
 	if err := ensureLogFileExists(wsOutLogPath); err != nil {
 		return err
 	}
-	wsOutLogFile := &lumberjack.Logger{
-		Filename:   wsOutLogPath,
-		MaxSize:    maxFileSizeMB,
-		MaxBackups: maxBackups,
-		MaxAge:     maxAgeDays,
-		Compress:   compress,
+	wsOutLogFile, err := newRotatingLogFile(wsOutLogPath, maxFileSizeMB, maxBackups, maxAgeDays, compress)
+	if err != nil {
+		return err
 	}
 	logFiles["ws_out"] = wsOutLogFile
 
 	if err := ensureLogFileExists(auditLogPath); err != nil {
 		return err
 	}
-	auditLogFile := &lumberjack.Logger{
-		Filename:   auditLogPath,
-		MaxSize:    maxFileSizeMB,
-		MaxBackups: maxBackups,
-		MaxAge:     maxAgeDays,
-		Compress:   compress,
+	auditLogFile, err := newRotatingLogFile(auditLogPath, maxFileSizeMB, maxBackups, maxAgeDays, compress)
+	if err != nil {
+		return err
 	}
 	logFiles["audit"] = auditLogFile
 
@@ -378,4 +363,33 @@ func ensureLogFileExists(path string) error {
 		return fmt.Errorf("close log file %s: %w", path, err)
 	}
 	return nil
+}
+
+func newRotatingLogFile(path string, maxSize, maxBackups, maxAge int, compress bool) (*lumberjack.Logger, error) {
+	l := &lumberjack.Logger{
+		Filename:   path,
+		MaxSize:    maxSize,
+		MaxBackups: maxBackups,
+		MaxAge:     maxAge,
+		Compress:   compress,
+	}
+
+	if shouldRotateOnStartup(path) {
+		if err := l.Rotate(); err != nil {
+			return nil, fmt.Errorf("rotate log on startup %s: %w", path, err)
+		}
+	}
+
+	return l, nil
+}
+
+func shouldRotateOnStartup(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	if !info.Mode().IsRegular() {
+		return false
+	}
+	return info.Size() > 0
 }
