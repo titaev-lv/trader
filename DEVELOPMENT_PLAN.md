@@ -1,7 +1,7 @@
 # План Развития Trader
 
-> Версия: 4.0
-> Дата: 2026-03-28
+> Версия: 4.1
+> Дата: 2026-03-30
 > Без оценок по времени, только этапы и критерии готовности
 
 ## 1. Для чего нужен этот план
@@ -24,6 +24,13 @@
 - модели задач и механизм расчета изменений подписок;
 - слой журналирования для WS-взаимодействия;
 - единый формат логов (`error`, `out_request`, `ws_in`, `ws_out`, `audit`).
+- базовый WS transport контур с `cts-core`:
+   - `trader.register` / `trader.register_ack`,
+   - `trader.heartbeat` / `trader.heartbeat_ack`,
+   - строгий TLS client mode (без insecure skip verify),
+   - linear reconnect backoff + jitter,
+   - идемпотентная обработка duplicate `seq`,
+   - graceful close handshake с bounded wait.
 
 Пока отсутствует:
 
@@ -99,7 +106,7 @@ flowchart TD
 1. Совместимость с `cts-core`:
    - `trader.register -> trader.register_ack`
    - `trader.heartbeat`
-   - корректная обработка ошибок протокола.
+   - корректная обработка ошибок протокола, duplicate/gap `seq`, graceful close.
 2. Разделение ответственности:
    - `cts-core` выбирает исполнителя;
    - решение `buy/sell` принимает `trader`.
