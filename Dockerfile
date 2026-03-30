@@ -11,8 +11,9 @@ RUN go mod download
 
 COPY . .
 
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-    go build -ldflags="-s -w" \
+RUN TRADER_VERSION="$(cat VERSION)" && \
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+    go build -ldflags="-s -w -X main.version=${TRADER_VERSION}" \
     -o trader \
     cmd/trader/main.go
 

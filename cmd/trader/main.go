@@ -16,11 +16,9 @@ import (
 	"trader/internal/manager"
 )
 
-// Version - текущая версия приложения
-// Используется для логирования при старте
-const (
-	Version = "2.0.2"
-)
+// version - текущая версия приложения.
+// Может быть переопределена через -ldflags "-X main.version=...".
+var version = "local-build"
 
 // main - основная функция приложения
 // Порядок инициализации критичен:
@@ -76,7 +74,7 @@ func main() {
 	log := logger.Get("main")
 	log.Info("\n\n")
 	log.Info("==========================================================")
-	log.Info("INIT START trader", "version", Version)
+	log.Info("INIT START trader", "version", version)
 	log.Info("Starting trader", "config", *configFile)
 
 	// 3. ИНИЦИАЛИЗАЦИЯ МЕНЕДЖЕРА
