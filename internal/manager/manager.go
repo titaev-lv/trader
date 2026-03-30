@@ -103,7 +103,7 @@ func (m *Manager) Start() error {
 	m.startTime = time.Now()
 	m.shutdownErr = nil
 
-	logger.Get("manager").Info("Starting runtime loop", "mode", "startup+event")
+	logger.Get("manager").Info("Starting runtime loop", "mode", "event-only")
 
 	if err := state.GetInstance().SetRunning(true); err != nil {
 		logger.Get("manager").Error("Failed to persist running state", "error", err)
@@ -201,10 +201,9 @@ func (m *Manager) runLoop() {
 	defer m.wg.Done()
 
 	log := logger.Get("manager.loop")
-	log.Info("runtime loop started")
+	log.Debug("runtime loop started")
 
 	watchCh := m.loopSource.Watch(m.ctx)
-	m.runIteration("startup")
 
 	for {
 		select {
