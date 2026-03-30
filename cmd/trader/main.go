@@ -16,9 +16,15 @@ import (
 	"trader/internal/manager"
 )
 
-// version - текущая версия приложения.
-// Может быть переопределена через -ldflags "-X main.version=...".
-var version = "local-build"
+// release - версия релиза бинарника.
+// commit - git commit, из которого собран бинарник.
+// buildTime - UTC timestamp времени сборки.
+// Значения переопределяются через ldflags.
+var (
+	release   = "dev"
+	commit    = "unknown"
+	buildTime = "unknown"
+)
 
 // main - основная функция приложения
 // Порядок инициализации критичен:
@@ -74,7 +80,7 @@ func main() {
 	log := logger.Get("main")
 	log.Info("\n\n")
 	log.Info("==========================================================")
-	log.Info("INIT START trader", "version", version)
+	log.Info("INIT START trader", "release", release, "commit", commit, "build_time", buildTime)
 	log.Info("Starting trader", "config", *configFile)
 
 	// 3. ИНИЦИАЛИЗАЦИЯ МЕНЕДЖЕРА
