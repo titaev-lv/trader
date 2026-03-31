@@ -448,9 +448,6 @@ func TestSendRegisterIncludesSeq(t *testing.T) {
 		if err := json.Unmarshal(env.Payload, &payload); err != nil {
 			t.Fatalf("unmarshal payload: %v", err)
 		}
-		if payload["version"] != "2.4.1" {
-			t.Fatalf("expected payload.version=2.4.1, got %v", payload["version"])
-		}
 		if payload["release"] != "2.4.1" {
 			t.Fatalf("expected payload.release=2.4.1, got %v", payload["release"])
 		}

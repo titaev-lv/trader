@@ -245,7 +245,11 @@ func (c *Client) runSession(ctx context.Context) error {
 
 		env, ok := decodeEnvelope(raw)
 		if ok {
-			c.wsInLog.Debug(string(raw), "direction", "in", "action", env.Action, "seq", env.Seq, "ack", env.Ack)
+			if shouldLogBusinessActionInfo(env.Action) {
+				c.wsInLog.Info(string(raw), "direction", "in", "action", env.Action, "seq", env.Seq, "ack", env.Ack)
+			} else {
+				c.wsInLog.Debug(string(raw), "direction", "in", "action", env.Action, "seq", env.Seq, "ack", env.Ack)
+			}
 			shouldProcess, gapErr := c.observeInboundEnvelope(*env)
 			if gapErr != nil {
 				c.log.Warn("cts-core ws sequence gap detected, reconnecting", "error", gapErr)
@@ -307,7 +311,6 @@ func (c *Client) sendRegister(conn *websocket.Conn) error {
 	}
 	if release := strings.TrimSpace(c.cfg.Release); release != "" {
 		payload["release"] = release
-		payload["version"] = release
 	}
 
 	seq, ack := c.nextOutboundSeqAck()
@@ -362,9 +365,35 @@ func (c *Client) writeJSON(conn *websocket.Conn, payload map[string]any) error {
 	}
 
 	if action, _ := payload["action"].(string); action != "" {
-		c.wsOutLog.Debug(string(raw), "direction", "out", "action", action, "seq", payload["seq"], "ack", payload["ack"])
+		if shouldLogBusinessActionInfo(action) {
+			c.wsOutLog.Info(string(raw), "direction", "out", "action", action, "seq", payload["seq"], "ack", payload["ack"])
+		} else {
+			c.wsOutLog.Debug(string(raw), "direction", "out", "action", action, "seq", payload["seq"], "ack", payload["ack"])
+		}
 	}
 	return nil
+}
+
+func shouldLogBusinessActionInfo(action string) bool {
+	action = strings.TrimSpace(action)
+	if action == "" {
+		return false
+	}
+
+	if action == "trader.heartbeat" || action == "trader.heartbeat_ack" {
+		return false
+	}
+
+	if strings.HasPrefix(action, "task.") {
+		return true
+	}
+
+	switch action {
+	case "trader.register", "trader.register_ack", "latency.test", "latency.test_result", "latency.test_result_ack", "error":
+		return true
+	default:
+		return false
+	}
 }
 
 func (c *Client) captureSessionID(env envelope) {
