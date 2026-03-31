@@ -44,7 +44,7 @@ type CoreWSConfig struct {
 	ReconnectDelaySec    int             `yaml:"reconnect_delay_sec"`
 	HeartbeatIntervalSec int             `yaml:"heartbeat_interval_sec"`
 	WriteTimeout         time.Duration   `yaml:"write_timeout"`
-	Version              string          `yaml:"version"`
+	ProtocolVersion      string          `yaml:"protocol_version"`
 	Region               string          `yaml:"region"`
 	TLS                  CoreWSTLSConfig `yaml:"tls"`
 }
@@ -250,6 +250,9 @@ func Load(path string) (*Config, error) {
 	if hasCoreWSTLSSkipVerify(data) {
 		return nil, fmt.Errorf("core_connections.ws.tls.skip_verify is no longer supported; remove this key")
 	}
+	if hasLegacyCoreWSVersionKey(data) {
+		return nil, fmt.Errorf("core_connections.ws.version is no longer supported; use core_connections.ws.protocol_version")
+	}
 	if hasLegacyTradeSection(data) {
 		return nil, fmt.Errorf("trade section is no longer supported; remove trade.update_interval from config")
 	}
@@ -290,6 +293,25 @@ func hasCoreWSTLSSkipVerify(data []byte) bool {
 	}
 
 	_, exists := tlsCfg["skip_verify"]
+	return exists
+}
+
+func hasLegacyCoreWSVersionKey(data []byte) bool {
+	var raw map[string]interface{}
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		return false
+	}
+
+	core := asStringMap(raw["core_connections"])
+	if core == nil {
+		return false
+	}
+	ws := asStringMap(core["ws"])
+	if ws == nil {
+		return false
+	}
+
+	_, exists := ws["version"]
 	return exists
 }
 
@@ -348,6 +370,9 @@ func hasLegacyWSLoggingKeys(data []byte) bool {
 func validateConfig(c *Config) error {
 	if raw, ok := os.LookupEnv("TRADER_CORE_CONNECTIONS_WS_TLS_SKIP_VERIFY"); ok && strings.TrimSpace(raw) != "" {
 		return fmt.Errorf("TRADER_CORE_CONNECTIONS_WS_TLS_SKIP_VERIFY is no longer supported")
+	}
+	if raw, ok := os.LookupEnv("TRADER_CORE_CONNECTIONS_WS_VERSION"); ok && strings.TrimSpace(raw) != "" {
+		return fmt.Errorf("TRADER_CORE_CONNECTIONS_WS_VERSION is no longer supported; use TRADER_CORE_CONNECTIONS_WS_PROTOCOL_VERSION")
 	}
 
 	legacyEnvToNew := map[string]string{
@@ -462,7 +487,7 @@ func defaultConfig() *Config {
 				ReconnectDelaySec:    1,
 				HeartbeatIntervalSec: 5,
 				WriteTimeout:         5 * time.Second,
-				Version:              "2.0.2",
+				ProtocolVersion:      "1",
 				Region:               "local",
 				TLS:                  CoreWSTLSConfig{},
 			},
@@ -590,8 +615,8 @@ func applyDefaults(c *Config) {
 	if c.CoreConnections.WS.WriteTimeout <= 0 {
 		c.CoreConnections.WS.WriteTimeout = 5 * time.Second
 	}
-	if c.CoreConnections.WS.Version == "" {
-		c.CoreConnections.WS.Version = "2.0.2"
+	if c.CoreConnections.WS.ProtocolVersion == "" {
+		c.CoreConnections.WS.ProtocolVersion = "1"
 	}
 	if c.CoreConnections.WS.Region == "" {
 		c.CoreConnections.WS.Region = "local"
@@ -650,7 +675,7 @@ func applyEnvOverrides(c *Config) {
 	c.CoreConnections.WS.ReconnectDelaySec = envInt("TRADER_CORE_CONNECTIONS_WS_RECONNECT_DELAY_SEC", c.CoreConnections.WS.ReconnectDelaySec)
 	c.CoreConnections.WS.HeartbeatIntervalSec = envInt("TRADER_CORE_CONNECTIONS_WS_HEARTBEAT_INTERVAL_SEC", c.CoreConnections.WS.HeartbeatIntervalSec)
 	c.CoreConnections.WS.WriteTimeout = envDuration("TRADER_CORE_CONNECTIONS_WS_WRITE_TIMEOUT", c.CoreConnections.WS.WriteTimeout)
-	c.CoreConnections.WS.Version = envString("TRADER_CORE_CONNECTIONS_WS_VERSION", c.CoreConnections.WS.Version)
+	c.CoreConnections.WS.ProtocolVersion = envString("TRADER_CORE_CONNECTIONS_WS_PROTOCOL_VERSION", c.CoreConnections.WS.ProtocolVersion)
 	c.CoreConnections.WS.Region = envString("TRADER_CORE_CONNECTIONS_WS_REGION", c.CoreConnections.WS.Region)
 	c.CoreConnections.WS.TLS.CAPath = envString("TRADER_CORE_CONNECTIONS_WS_TLS_CA_PATH", c.CoreConnections.WS.TLS.CAPath)
 	c.CoreConnections.WS.TLS.CertPath = envString("TRADER_CORE_CONNECTIONS_WS_TLS_CERT_PATH", c.CoreConnections.WS.TLS.CertPath)

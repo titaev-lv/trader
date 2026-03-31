@@ -303,17 +303,17 @@ func (c *Client) heartbeatLoop(ctx context.Context, conn *websocket.Conn) {
 
 func (c *Client) sendRegister(conn *websocket.Conn) error {
 	payload := map[string]any{
-		"version": c.cfg.Version,
-		"region":  c.cfg.Region,
+		"region": c.cfg.Region,
 	}
 
 	seq, ack := c.nextOutboundSeqAck()
 	env := map[string]any{
-		"type":       "request",
-		"action":     "trader.register",
-		"seq":        seq,
-		"request_id": fmt.Sprintf("reg-%d", time.Now().UTC().UnixNano()),
-		"payload":    payload,
+		"type":             "request",
+		"action":           "trader.register",
+		"protocol_version": c.cfg.ProtocolVersion,
+		"seq":              seq,
+		"request_id":       fmt.Sprintf("reg-%d", time.Now().UTC().UnixNano()),
+		"payload":          payload,
 	}
 	if ack > 0 {
 		env["ack"] = ack

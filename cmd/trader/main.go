@@ -80,7 +80,6 @@ func main() {
 	// Получаем логгер для main модуля
 	// Все логи будут помечены префиксом "main" для удобства поиска
 	log := logger.Get("main")
-	log.Info("==========================================================")
 	log.Info("INIT START trader", "release", release, "commit", commit, "build_time", buildTime)
 	log.Info("Starting trader", "config", *configFile)
 

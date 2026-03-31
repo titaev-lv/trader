@@ -423,8 +423,8 @@ func TestSendRegisterIncludesSeq(t *testing.T) {
 	defer conn.Close()
 
 	c := New(config.CoreWSConfig{
-		Version: "2.0.2",
-		Region:  "local",
+		ProtocolVersion: "1",
+		Region:          "local",
 	}, nil)
 
 	if err := c.sendRegister(conn); err != nil {

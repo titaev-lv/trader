@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -187,9 +188,142 @@ func Init(levelStr, format string, maxFileSizeMB int, maxBackups int, maxAgeDays
 
 func newHandler(format string, writer io.Writer, opts *slog.HandlerOptions) slog.Handler {
 	if strings.EqualFold(format, "text") {
-		return slog.NewTextHandler(writer, opts)
+		return slog.NewTextHandler(&textValueOnlyWriter{dst: writer}, opts)
 	}
 	return slog.NewJSONHandler(writer, opts)
+}
+
+type textValueOnlyWriter struct {
+	dst io.Writer
+}
+
+func (w *textValueOnlyWriter) Write(p []byte) (int, error) {
+	if w == nil || w.dst == nil {
+		return len(p), nil
+	}
+
+	text := string(p)
+	lines := strings.SplitAfter(text, "\n")
+	var b strings.Builder
+	b.Grow(len(text))
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+		hasNewline := strings.HasSuffix(line, "\n")
+		trimmed := strings.TrimSuffix(line, "\n")
+		b.WriteString(stripTextPrefixKeys(trimmed))
+		if hasNewline {
+			b.WriteByte('\n')
+		}
+	}
+
+	if _, err := w.dst.Write([]byte(b.String())); err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}
+
+func stripTextPrefixKeys(line string) string {
+	if !strings.HasPrefix(line, "time=") {
+		return line
+	}
+
+	idx := len("time=")
+	timeVal, next, ok := readAttrValue(line, idx)
+	if !ok {
+		return line
+	}
+
+	idx = next
+	levelVal := ""
+	if strings.HasPrefix(line[idx:], "level=") {
+		idx += len("level=")
+		var levelOK bool
+		levelVal, idx, levelOK = readAttrValue(line, idx)
+		if !levelOK {
+			return line
+		}
+	}
+
+	if !strings.HasPrefix(line[idx:], "msg=") {
+		return line
+	}
+	idx += len("msg=")
+	msgVal, idx, ok := readAttrValue(line, idx)
+	if !ok {
+		return line
+	}
+	msgVal = normalizeMsgValue(msgVal)
+
+	rest := strings.TrimLeft(line[idx:], " ")
+	if levelVal != "" {
+		if rest != "" {
+			return timeVal + " " + levelVal + " " + msgVal + " " + rest
+		}
+		return timeVal + " " + levelVal + " " + msgVal
+	}
+
+	if rest != "" {
+		return timeVal + " " + msgVal + " " + rest
+	}
+	return timeVal + " " + msgVal
+}
+
+func normalizeMsgValue(raw string) string {
+	if len(raw) >= 2 && raw[0] == '"' && raw[len(raw)-1] == '"' {
+		unquoted, err := strconv.Unquote(raw)
+		if err == nil {
+			return unquoted
+		}
+		return strings.Trim(raw, "\"")
+	}
+	return raw
+}
+
+func readAttrValue(line string, start int) (value string, next int, ok bool) {
+	if start >= len(line) {
+		return "", start, false
+	}
+
+	if line[start] == '"' {
+		i := start + 1
+		escaped := false
+		end := -1
+		for i < len(line) {
+			ch := line[i]
+			if escaped {
+				escaped = false
+				i++
+				continue
+			}
+			if ch == '\\' {
+				escaped = true
+				i++
+				continue
+			}
+			if ch == '"' {
+				end = i + 1
+				i = end
+				for i < len(line) && line[i] == ' ' {
+					i++
+				}
+				return line[start:end], i, true
+			}
+			i++
+		}
+		return "", start, false
+	}
+
+	i := start
+	for i < len(line) && line[i] != ' ' {
+		i++
+	}
+	val := line[start:i]
+	for i < len(line) && line[i] == ' ' {
+		i++
+	}
+	return val, i, true
 }
 
 // Get - возвращает логгер для конкретного модуля
