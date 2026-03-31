@@ -486,7 +486,7 @@ func defaultConfig() *Config {
 				Enabled:              false,
 				URL:                  "wss://localhost:8081/ws",
 				ReconnectDelaySec:    1,
-				HeartbeatIntervalSec: 5,
+				HeartbeatIntervalSec: 60,
 				WriteTimeout:         5 * time.Second,
 				ProtocolVersion:      "1",
 				Region:               "local",
@@ -611,7 +611,7 @@ func applyDefaults(c *Config) {
 		c.CoreConnections.WS.ReconnectDelaySec = 1
 	}
 	if c.CoreConnections.WS.HeartbeatIntervalSec <= 0 {
-		c.CoreConnections.WS.HeartbeatIntervalSec = 5
+		c.CoreConnections.WS.HeartbeatIntervalSec = 60
 	}
 	if c.CoreConnections.WS.WriteTimeout <= 0 {
 		c.CoreConnections.WS.WriteTimeout = 5 * time.Second

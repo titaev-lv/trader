@@ -286,7 +286,7 @@ func (c *Client) runSession(ctx context.Context) error {
 func (c *Client) heartbeatLoop(ctx context.Context, conn *websocket.Conn) {
 	interval := time.Duration(c.cfg.HeartbeatIntervalSec) * time.Second
 	if interval <= 0 {
-		interval = 5 * time.Second
+		interval = 60 * time.Second
 	}
 
 	ticker := time.NewTicker(interval)
@@ -380,7 +380,7 @@ func shouldLogBusinessActionInfo(action string) bool {
 		return false
 	}
 
-	if action == "trader.heartbeat" || action == "trader.heartbeat_ack" {
+	if action == "trader.heartbeat_ack" {
 		return false
 	}
 
@@ -389,7 +389,7 @@ func shouldLogBusinessActionInfo(action string) bool {
 	}
 
 	switch action {
-	case "trader.register", "trader.register_ack", "latency.test", "latency.test_result", "latency.test_result_ack", "error":
+	case "trader.register", "trader.register_ack", "trader.heartbeat", "latency.test", "latency.test_result", "latency.test_result_ack", "error":
 		return true
 	default:
 		return false

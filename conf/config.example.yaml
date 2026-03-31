@@ -24,7 +24,7 @@ core_connections:
     enabled: true
     url: "wss://cts-core:8080/ws"
     reconnect_delay_sec: 1
-    heartbeat_interval_sec: 5
+    heartbeat_interval_sec: 60
     write_timeout: 5s
     protocol_version: "1"
     region: "local"
