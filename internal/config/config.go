@@ -46,6 +46,7 @@ type CoreWSConfig struct {
 	WriteTimeout         time.Duration   `yaml:"write_timeout"`
 	ProtocolVersion      string          `yaml:"protocol_version"`
 	Region               string          `yaml:"region"`
+	Release              string          `yaml:"-"`
 	TLS                  CoreWSTLSConfig `yaml:"tls"`
 }
 

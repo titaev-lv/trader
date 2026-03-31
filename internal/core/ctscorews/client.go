@@ -305,6 +305,10 @@ func (c *Client) sendRegister(conn *websocket.Conn) error {
 	payload := map[string]any{
 		"region": c.cfg.Region,
 	}
+	if release := strings.TrimSpace(c.cfg.Release); release != "" {
+		payload["release"] = release
+		payload["version"] = release
+	}
 
 	seq, ack := c.nextOutboundSeqAck()
 	env := map[string]any{

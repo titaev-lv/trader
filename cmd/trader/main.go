@@ -48,6 +48,7 @@ func main() {
 		fmt.Printf("Failed to load config: %v\n", err)
 		os.Exit(1)
 	}
+	cfg.CoreConnections.WS.Release = release
 
 	// 2. ИНИЦИАЛИЗАЦИЯ ЛОГИРОВАНИЯ
 	// Логирование - самый важный компонент для отладки проблем в production

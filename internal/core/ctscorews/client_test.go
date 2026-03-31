@@ -425,6 +425,7 @@ func TestSendRegisterIncludesSeq(t *testing.T) {
 	c := New(config.CoreWSConfig{
 		ProtocolVersion: "1",
 		Region:          "local",
+		Release:         "2.4.1",
 	}, nil)
 
 	if err := c.sendRegister(conn); err != nil {
@@ -441,6 +442,17 @@ func TestSendRegisterIncludesSeq(t *testing.T) {
 		}
 		if env.Ack != 0 {
 			t.Fatalf("expected ack=0 for first register, got %d", env.Ack)
+		}
+
+		var payload map[string]interface{}
+		if err := json.Unmarshal(env.Payload, &payload); err != nil {
+			t.Fatalf("unmarshal payload: %v", err)
+		}
+		if payload["version"] != "2.4.1" {
+			t.Fatalf("expected payload.version=2.4.1, got %v", payload["version"])
+		}
+		if payload["release"] != "2.4.1" {
+			t.Fatalf("expected payload.release=2.4.1, got %v", payload["release"])
 		}
 	case <-time.After(1 * time.Second):
 		t.Fatalf("timeout waiting for register envelope")
