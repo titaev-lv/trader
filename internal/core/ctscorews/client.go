@@ -348,10 +348,11 @@ func (c *Client) sendHeartbeat(conn *websocket.Conn) error {
 
 	seq, ack := c.nextOutboundSeqAck()
 	env := map[string]any{
-		"type":    "event",
-		"action":  "trader.heartbeat",
-		"seq":     seq,
-		"payload": payload,
+		"type":       "event",
+		"action":     "trader.heartbeat",
+		"seq":        seq,
+		"request_id": fmt.Sprintf("hb-%d", time.Now().UTC().UnixNano()),
+		"payload":    payload,
 	}
 	if ack > 0 {
 		env["ack"] = ack

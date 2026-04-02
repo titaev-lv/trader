@@ -493,6 +493,68 @@ func TestSendRegisterIncludesSeq(t *testing.T) {
 	}
 }
 
+func TestSendHeartbeatIncludesRequestID(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(_ *http.Request) bool { return true }}
+	received := make(chan envelope, 1)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		_, raw, err := conn.ReadMessage()
+		if err != nil {
+			return
+		}
+		var env envelope
+		if err := json.Unmarshal(raw, &env); err != nil {
+			return
+		}
+		received <- env
+	})
+
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	c := New(config.CoreWSConfig{}, nil)
+	c.setSessionID("sid-1")
+
+	if err := c.sendHeartbeat(conn); err != nil {
+		t.Fatalf("sendHeartbeat: %v", err)
+	}
+
+	select {
+	case env := <-received:
+		if env.Action != "trader.heartbeat" {
+			t.Fatalf("expected action trader.heartbeat, got %q", env.Action)
+		}
+		if env.Type != "event" {
+			t.Fatalf("expected type event, got %q", env.Type)
+		}
+		if env.RequestID == "" {
+			t.Fatalf("expected non-empty request_id for heartbeat")
+		}
+		if !strings.HasPrefix(env.RequestID, "hb-") {
+			t.Fatalf("expected heartbeat request_id prefix hb-, got %q", env.RequestID)
+		}
+		if env.Seq != 1 {
+			t.Fatalf("expected seq=1, got %d", env.Seq)
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatalf("timeout waiting for heartbeat envelope")
+	}
+}
+
 func writeTLSMaterialFiles(t *testing.T) (caPath, certPath, keyPath string) {
 	t.Helper()
 
