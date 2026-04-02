@@ -343,11 +343,14 @@ func GetOutRequest(module string) *slog.Logger {
 	return OutRequestLog.With("module", module)
 }
 
-func GetWSCore(module string) *slog.Logger {
+func GetWSCore(_ string) *slog.Logger {
 	if WSCoreLog == nil {
-		return Get(module)
+		if Log == nil {
+			return slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo, ReplaceAttr: replaceTimeAttr}))
+		}
+		return Log
 	}
-	return WSCoreLog.With("module", module)
+	return WSCoreLog
 }
 
 func GetWSExchanges(module string) *slog.Logger {

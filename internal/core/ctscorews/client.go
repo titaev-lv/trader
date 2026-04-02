@@ -41,6 +41,10 @@ type Client struct {
 	writeMu   sync.Mutex
 	sessionMu sync.RWMutex
 	sessionID string
+	connMu    sync.RWMutex
+	connID    string
+	msgMu     sync.Mutex
+	msgID     uint64
 
 	seqMu       sync.Mutex
 	inboundSeq  uint64
@@ -221,6 +225,9 @@ func (c *Client) runSession(ctx context.Context) error {
 
 	c.log.Info("cts-core ws connected", "url", c.cfg.URL)
 	c.setSessionID("")
+	c.setConnID(newConnID())
+	c.resetMessageSequence()
+	defer c.setConnID("")
 	c.resetSequenceState()
 	c.prepareConn(conn)
 
@@ -245,10 +252,12 @@ func (c *Client) runSession(ctx context.Context) error {
 
 		env, ok := decodeEnvelope(raw)
 		if ok {
+			msgID := c.nextMessageID()
+			attrs := []any{"direction", "in", "action", env.Action, "seq", env.Seq, "ack", env.Ack, "conn_id", c.getConnID(), "msg_id", msgID, "request_id", env.RequestID}
 			if shouldLogBusinessActionInfo(env.Action) {
-				c.wsInLog.Info(string(raw), "direction", "in", "action", env.Action, "seq", env.Seq, "ack", env.Ack)
+				c.wsInLog.Info(string(raw), attrs...)
 			} else {
-				c.wsInLog.Debug(string(raw), "direction", "in", "action", env.Action, "seq", env.Seq, "ack", env.Ack)
+				c.wsInLog.Debug(string(raw), attrs...)
 			}
 			shouldProcess, gapErr := c.observeInboundEnvelope(*env)
 			if gapErr != nil {
@@ -268,7 +277,7 @@ func (c *Client) runSession(ctx context.Context) error {
 		} else if !isTaskEnvelope(raw) {
 			continue
 		} else {
-			c.wsInLog.Debug(string(raw), "direction", "in")
+			c.wsInLog.Debug(string(raw), "direction", "in", "conn_id", c.getConnID(), "msg_id", c.nextMessageID(), "request_id", "")
 		}
 
 		if c.handler == nil {
@@ -365,13 +374,31 @@ func (c *Client) writeJSON(conn *websocket.Conn, payload map[string]any) error {
 	}
 
 	if action, _ := payload["action"].(string); action != "" {
+		msgID := c.nextMessageID()
+		requestID := requestIDFromPayload(payload)
+		attrs := []any{"direction", "out", "action", action, "seq", payload["seq"], "ack", payload["ack"], "conn_id", c.getConnID(), "msg_id", msgID, "request_id", requestID}
 		if shouldLogBusinessActionInfo(action) {
-			c.wsOutLog.Info(string(raw), "direction", "out", "action", action, "seq", payload["seq"], "ack", payload["ack"])
+			c.wsOutLog.Info(string(raw), attrs...)
 		} else {
-			c.wsOutLog.Debug(string(raw), "direction", "out", "action", action, "seq", payload["seq"], "ack", payload["ack"])
+			c.wsOutLog.Debug(string(raw), attrs...)
 		}
 	}
 	return nil
+}
+
+func requestIDFromPayload(payload map[string]any) string {
+	if payload == nil {
+		return ""
+	}
+	v, ok := payload["request_id"]
+	if !ok || v == nil {
+		return ""
+	}
+	s, ok := v.(string)
+	if ok {
+		return s
+	}
+	return fmt.Sprint(v)
 }
 
 func shouldLogBusinessActionInfo(action string) bool {
@@ -424,6 +451,35 @@ func (c *Client) getSessionID() string {
 	c.sessionMu.RLock()
 	defer c.sessionMu.RUnlock()
 	return c.sessionID
+}
+
+func newConnID() string {
+	return fmt.Sprintf("ws-%d", time.Now().UTC().UnixNano())
+}
+
+func (c *Client) setConnID(connID string) {
+	c.connMu.Lock()
+	defer c.connMu.Unlock()
+	c.connID = connID
+}
+
+func (c *Client) getConnID() string {
+	c.connMu.RLock()
+	defer c.connMu.RUnlock()
+	return c.connID
+}
+
+func (c *Client) resetMessageSequence() {
+	c.msgMu.Lock()
+	defer c.msgMu.Unlock()
+	c.msgID = 0
+}
+
+func (c *Client) nextMessageID() uint64 {
+	c.msgMu.Lock()
+	defer c.msgMu.Unlock()
+	c.msgID++
+	return c.msgID
 }
 
 func isTaskEnvelope(raw []byte) bool {
@@ -702,7 +758,7 @@ func (c *Client) sendPing(conn *websocket.Conn) error {
 		return err
 	}
 
-	c.wsOutLog.Debug(controlFrameMsg("ping", seq, ack), "direction", "out", "frame", "ping", "seq", seq, "ack", ack)
+	c.wsOutLog.Debug(controlFrameMsg("ping", seq, ack), "direction", "out", "frame", "ping", "seq", seq, "ack", ack, "conn_id", c.getConnID(), "msg_id", c.nextMessageID(), "request_id", "")
 	return nil
 }
 
@@ -718,11 +774,11 @@ func (c *Client) touchPong(appData string) {
 	if len(raw) >= 16 {
 		seq := binary.BigEndian.Uint64(raw[0:8])
 		ack := binary.BigEndian.Uint64(raw[8:16])
-		c.wsInLog.Debug(controlFrameMsg("pong", seq, ack), "direction", "in", "frame", "pong", "seq", seq, "ack", ack)
+		c.wsInLog.Debug(controlFrameMsg("pong", seq, ack), "direction", "in", "frame", "pong", "seq", seq, "ack", ack, "conn_id", c.getConnID(), "msg_id", c.nextMessageID(), "request_id", "")
 		return
 	}
 
-	c.wsInLog.Debug(controlFrameMsg("pong", 0, 0), "direction", "in", "frame", "pong")
+	c.wsInLog.Debug(controlFrameMsg("pong", 0, 0), "direction", "in", "frame", "pong", "conn_id", c.getConnID(), "msg_id", c.nextMessageID(), "request_id", "")
 }
 
 func controlFrameMsg(frame string, seq uint64, ack uint64) string {

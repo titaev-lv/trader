@@ -63,6 +63,43 @@ func TestPingSeqDoesNotAdvanceOutboundEnvelopeSeq(t *testing.T) {
 	}
 }
 
+func TestRequestIDFromPayload(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload map[string]any
+		want    string
+	}{
+		{name: "nil payload", payload: nil, want: ""},
+		{name: "missing request_id", payload: map[string]any{"action": "trader.register"}, want: ""},
+		{name: "string request_id", payload: map[string]any{"request_id": "req-42"}, want: "req-42"},
+		{name: "numeric request_id", payload: map[string]any{"request_id": 17}, want: "17"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := requestIDFromPayload(tt.payload)
+			if got != tt.want {
+				t.Fatalf("expected request_id %q, got %q", tt.want, got)
+			}
+		})
+	}
+}
+
+func TestNextMessageID(t *testing.T) {
+	c := New(config.CoreWSConfig{}, nil)
+
+	first := c.nextMessageID()
+	second := c.nextMessageID()
+	if first != 1 || second != 2 {
+		t.Fatalf("expected consecutive message ids 1,2; got %d,%d", first, second)
+	}
+
+	c.resetMessageSequence()
+	if got := c.nextMessageID(); got != 1 {
+		t.Fatalf("expected message id reset to 1, got %d", got)
+	}
+}
+
 func TestClassifyReconnectReasonClose4009(t *testing.T) {
 	reason := classifyReconnectReason(&websocket.CloseError{Code: 4009, Text: "seq gap"})
 	if reason != reconnectReasonClose4009 {
