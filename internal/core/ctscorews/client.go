@@ -758,7 +758,8 @@ func (c *Client) sendPing(conn *websocket.Conn) error {
 		return err
 	}
 
-	c.wsOutLog.Debug(controlFrameMsg("ping", seq, ack), "direction", "out", "frame", "ping", "seq", seq, "ack", ack, "conn_id", c.getConnID(), "msg_id", c.nextMessageID(), "request_id", "")
+	msgID := c.nextMessageID()
+	c.wsOutLog.Debug(controlFrameMsg("ping", seq, ack), "direction", "out", "frame", "ping", "seq", seq, "ack", ack, "conn_id", c.getConnID(), "msg_id", msgID)
 	return nil
 }
 
@@ -774,11 +775,13 @@ func (c *Client) touchPong(appData string) {
 	if len(raw) >= 16 {
 		seq := binary.BigEndian.Uint64(raw[0:8])
 		ack := binary.BigEndian.Uint64(raw[8:16])
-		c.wsInLog.Debug(controlFrameMsg("pong", seq, ack), "direction", "in", "frame", "pong", "seq", seq, "ack", ack, "conn_id", c.getConnID(), "msg_id", c.nextMessageID(), "request_id", "")
+		msgID := c.nextMessageID()
+		c.wsInLog.Debug(controlFrameMsg("pong", seq, ack), "direction", "in", "frame", "pong", "seq", seq, "ack", ack, "conn_id", c.getConnID(), "msg_id", msgID)
 		return
 	}
 
-	c.wsInLog.Debug(controlFrameMsg("pong", 0, 0), "direction", "in", "frame", "pong", "conn_id", c.getConnID(), "msg_id", c.nextMessageID(), "request_id", "")
+	msgID := c.nextMessageID()
+	c.wsInLog.Debug(controlFrameMsg("pong", 0, 0), "direction", "in", "frame", "pong", "conn_id", c.getConnID(), "msg_id", msgID)
 }
 
 func controlFrameMsg(frame string, seq uint64, ack uint64) string {
