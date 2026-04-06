@@ -51,6 +51,7 @@ type Client struct {
 	outboundSeq uint64
 	peerAck     uint64
 	pingSeq     uint64
+	pingAck     uint64
 
 	metricsMu             sync.Mutex
 	reconnectTotal        uint64
@@ -65,6 +66,7 @@ const (
 	reconnectErrorTotalThreshold  uint64 = 5
 	reconnectErrorReasonThreshold uint64 = 3
 
+	defaultRegisterAckTimeout = 10 * time.Second
 	defaultPingInterval = 10 * time.Second
 	defaultPongTimeout  = 30 * time.Second
 	defaultWriteTimeout = 5 * time.Second
@@ -231,14 +233,27 @@ func (c *Client) runSession(ctx context.Context) error {
 	c.resetSequenceState()
 	c.prepareConn(conn)
 
-	if err := c.sendRegister(conn); err != nil {
+	registerRequestID := fmt.Sprintf("reg-%d", time.Now().UTC().UnixNano())
+	if err := c.sendRegisterWithRequestID(conn, registerRequestID); err != nil {
 		return err
+	}
+
+	if err := conn.SetReadDeadline(time.Now().Add(defaultRegisterAckTimeout)); err != nil {
+		return fmt.Errorf("set register ack deadline: %w", err)
 	}
 
 	hbCtx, hbCancel := context.WithCancel(ctx)
 	defer hbCancel()
-	go c.heartbeatLoop(hbCtx, conn)
-	go c.pingLoop(hbCtx, conn)
+	registered := false
+	loopsStarted := false
+	startLoops := func() {
+		if loopsStarted {
+			return
+		}
+		go c.heartbeatLoop(hbCtx, conn)
+		go c.pingLoop(hbCtx, conn)
+		loopsStarted = true
+	}
 
 	for {
 		if ctx.Err() != nil {
@@ -247,6 +262,11 @@ func (c *Client) runSession(ctx context.Context) error {
 
 		_, raw, err := conn.ReadMessage()
 		if err != nil {
+			if !registered {
+				if ne, ok := err.(net.Error); ok && ne.Timeout() {
+					return fmt.Errorf("register ack timeout: %w", err)
+				}
+			}
 			return fmt.Errorf("read ws message: %w", err)
 		}
 
@@ -267,8 +287,32 @@ func (c *Client) runSession(ctx context.Context) error {
 			if !shouldProcess {
 				continue
 			}
-			if env.Action == "trader.register_ack" {
+
+			if !registered {
+				if isRegisterRejectEnvelope(*env, registerRequestID) {
+					code, message := decodeErrorPayload(env.Payload)
+					return fmt.Errorf("register rejected: code=%s message=%s", code, message)
+				}
+				if env.Action != "trader.register_ack" {
+					continue
+				}
+				if env.RequestID != registerRequestID {
+					continue
+				}
+				registered = true
 				c.captureSessionID(*env)
+				if c.getSessionID() == "" {
+					return fmt.Errorf("register ack missing session_id")
+				}
+				if err := conn.SetReadDeadline(time.Time{}); err != nil {
+					return fmt.Errorf("clear register ack deadline: %w", err)
+				}
+				startLoops()
+			}
+
+			if registered && shouldReconnectAfterServerStateError(*env) {
+				code, message := decodeErrorPayload(env.Payload)
+				return fmt.Errorf("server state mismatch: code=%s message=%s", code, message)
 			}
 
 			if !strings.HasPrefix(env.Action, "task.") {
@@ -315,6 +359,11 @@ func (c *Client) heartbeatLoop(ctx context.Context, conn *websocket.Conn) {
 }
 
 func (c *Client) sendRegister(conn *websocket.Conn) error {
+	requestID := fmt.Sprintf("reg-%d", time.Now().UTC().UnixNano())
+	return c.sendRegisterWithRequestID(conn, requestID)
+}
+
+func (c *Client) sendRegisterWithRequestID(conn *websocket.Conn, requestID string) error {
 	payload := map[string]any{
 		"region": c.cfg.Region,
 	}
@@ -328,7 +377,7 @@ func (c *Client) sendRegister(conn *websocket.Conn) error {
 		"action":           "trader.register",
 		"protocol_version": c.cfg.ProtocolVersion,
 		"seq":              seq,
-		"request_id":       fmt.Sprintf("reg-%d", time.Now().UTC().UnixNano()),
+		"request_id":       requestID,
 		"payload":          payload,
 	}
 	if ack > 0 {
@@ -400,6 +449,49 @@ func requestIDFromPayload(payload map[string]any) string {
 		return s
 	}
 	return fmt.Sprint(v)
+}
+
+func isRegisterRejectEnvelope(env envelope, registerRequestID string) bool {
+	if env.Action != "error" {
+		return false
+	}
+	if registerRequestID == "" {
+		return false
+	}
+	return env.RequestID == registerRequestID
+}
+
+func shouldReconnectAfterServerStateError(env envelope) bool {
+	if env.Action != "error" {
+		return false
+	}
+	code, message := decodeErrorPayload(env.Payload)
+	if !strings.EqualFold(code, "INVALID_MESSAGE") {
+		return false
+	}
+	msg := strings.ToLower(strings.TrimSpace(message))
+	if msg == "" {
+		return false
+	}
+	return strings.Contains(msg, "trader.register") && strings.Contains(msg, "required")
+}
+
+func decodeErrorPayload(raw json.RawMessage) (string, string) {
+	if len(raw) == 0 {
+		return "UNKNOWN", ""
+	}
+	var payload struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return "UNKNOWN", ""
+	}
+	code := strings.TrimSpace(payload.Code)
+	if code == "" {
+		code = "UNKNOWN"
+	}
+	return code, strings.TrimSpace(payload.Message)
 }
 
 func shouldLogBusinessActionInfo(action string) bool {
@@ -531,6 +623,7 @@ func (c *Client) resetSequenceState() {
 	c.outboundSeq = 0
 	c.peerAck = 0
 	c.pingSeq = 0
+	c.pingAck = 0
 	c.seqMu.Unlock()
 }
 
@@ -547,9 +640,17 @@ func (c *Client) nextPingSeqAck() (seq uint64, ack uint64) {
 	c.seqMu.Lock()
 	c.pingSeq++
 	seq = c.pingSeq
-	ack = c.inboundSeq
+	ack = c.pingAck
 	c.seqMu.Unlock()
 	return seq, ack
+}
+
+func (c *Client) observePingAck(ack uint64) {
+	c.seqMu.Lock()
+	if ack > c.pingAck {
+		c.pingAck = ack
+	}
+	c.seqMu.Unlock()
 }
 
 func (c *Client) observeInboundSeq(seq uint64) (expected uint64, ok bool, gap bool) {
@@ -776,6 +877,7 @@ func (c *Client) touchPong(appData string) {
 	if len(raw) >= 16 {
 		seq := binary.BigEndian.Uint64(raw[0:8])
 		ack := binary.BigEndian.Uint64(raw[8:16])
+		c.observePingAck(seq)
 		msgID := c.nextMessageID()
 		c.wsInLog.Debug(controlFrameMsg("pong", seq, ack), "direction", "in", "frame", "pong", "seq", seq, "ack", ack, "conn_id", c.getConnID(), "msg_id", msgID)
 		return

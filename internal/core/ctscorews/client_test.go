@@ -63,6 +63,27 @@ func TestPingSeqDoesNotAdvanceOutboundEnvelopeSeq(t *testing.T) {
 	}
 }
 
+func TestPingAckUsesControlSequence(t *testing.T) {
+	c := New(config.CoreWSConfig{}, nil)
+
+	// Business inbound seq should not affect control ping ack.
+	if _, ok, gap := c.observeInboundSeq(1); !ok || gap {
+		t.Fatalf("expected inbound business seq=1 accepted")
+	}
+
+	pingSeq, pingAck := c.nextPingSeqAck()
+	if pingSeq != 1 || pingAck != 0 {
+		t.Fatalf("expected first control ping (seq=1 ack=0), got (seq=%d ack=%d)", pingSeq, pingAck)
+	}
+
+	// Confirm first ping via pong echo seq, then next ping should carry ack=1.
+	c.observePingAck(1)
+	pingSeq, pingAck = c.nextPingSeqAck()
+	if pingSeq != 2 || pingAck != 1 {
+		t.Fatalf("expected second control ping (seq=2 ack=1), got (seq=%d ack=%d)", pingSeq, pingAck)
+	}
+}
+
 func TestRequestIDFromPayload(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -82,6 +103,42 @@ func TestRequestIDFromPayload(t *testing.T) {
 				t.Fatalf("expected request_id %q, got %q", tt.want, got)
 			}
 		})
+	}
+}
+
+func TestIsRegisterRejectEnvelope(t *testing.T) {
+	if !isRegisterRejectEnvelope(envelope{Action: "error", RequestID: "reg-1"}, "reg-1") {
+		t.Fatalf("expected register reject envelope to match")
+	}
+	if isRegisterRejectEnvelope(envelope{Action: "error", RequestID: "reg-2"}, "reg-1") {
+		t.Fatalf("expected request_id mismatch to be false")
+	}
+	if isRegisterRejectEnvelope(envelope{Action: "trader.register_ack", RequestID: "reg-1"}, "reg-1") {
+		t.Fatalf("expected non-error action to be false")
+	}
+}
+
+func TestShouldReconnectAfterServerStateError(t *testing.T) {
+	env := envelope{
+		Action: "error",
+		Payload: mustJSON(t, map[string]any{
+			"code":    "INVALID_MESSAGE",
+			"message": "trader.register is required before heartbeat",
+		}),
+	}
+	if !shouldReconnectAfterServerStateError(env) {
+		t.Fatalf("expected reconnect decision for register-required invalid message")
+	}
+
+	nonReconnect := envelope{
+		Action: "error",
+		Payload: mustJSON(t, map[string]any{
+			"code":    "DUPLICATE_CONNECTION",
+			"message": "Trader already has an active session",
+		}),
+	}
+	if shouldReconnectAfterServerStateError(nonReconnect) {
+		t.Fatalf("expected duplicate connection not to trigger desync reconnect path")
 	}
 }
 
@@ -493,6 +550,54 @@ func TestSendRegisterIncludesSeq(t *testing.T) {
 	}
 }
 
+func TestSendRegisterWithRequestID(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(_ *http.Request) bool { return true }}
+	received := make(chan envelope, 1)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		_, raw, err := conn.ReadMessage()
+		if err != nil {
+			return
+		}
+		var env envelope
+		if err := json.Unmarshal(raw, &env); err != nil {
+			return
+		}
+		received <- env
+	})
+
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	c := New(config.CoreWSConfig{ProtocolVersion: "1", Region: "local"}, nil)
+	if err := c.sendRegisterWithRequestID(conn, "reg-fixed-1"); err != nil {
+		t.Fatalf("sendRegisterWithRequestID: %v", err)
+	}
+
+	select {
+	case env := <-received:
+		if env.RequestID != "reg-fixed-1" {
+			t.Fatalf("expected request_id reg-fixed-1, got %q", env.RequestID)
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatalf("timeout waiting for register envelope")
+	}
+}
+
 func TestSendHeartbeatIncludesRequestID(t *testing.T) {
 	upgrader := websocket.Upgrader{CheckOrigin: func(_ *http.Request) bool { return true }}
 	received := make(chan envelope, 1)
@@ -553,6 +658,15 @@ func TestSendHeartbeatIncludesRequestID(t *testing.T) {
 	case <-time.After(1 * time.Second):
 		t.Fatalf("timeout waiting for heartbeat envelope")
 	}
+}
+
+func mustJSON(t *testing.T, v any) json.RawMessage {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("marshal json: %v", err)
+	}
+	return json.RawMessage(b)
 }
 
 func writeTLSMaterialFiles(t *testing.T) (caPath, certPath, keyPath string) {
